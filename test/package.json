@@ -1,0 +1,12 @@
+{
+  "name": "fluid-sph-rain-test",
+  "private": true,
+  "type": "module",
+  "description": "fluid-sph-rain 冒烟/视觉测试（不参与应用运行，换机器后先 npm i）",
+  "scripts": {
+    "test": "node smoke.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^23.11.1"
+  }
+}

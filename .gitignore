@@ -1,0 +1,11 @@
+# 依赖与本地产物
+node_modules/
+.npm-cache/
+
+# 无头浏览器测试配置目录
+.chrome-test-profile/
+.edge-test-profile/
+
+# 系统文件
+Thumbs.db
+.DS_Store

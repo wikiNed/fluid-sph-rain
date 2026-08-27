@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cesium 流体模拟 · 高程驱动 + 降雨模拟</title>
+    <script src="./Cesium/Cesium.js"></script>
+    <link rel="stylesheet" href="./Cesium/Widgets/widgets.css" />
+    <script src="./libs/dat.gui.min.js"></script>
+    <script src="./libs/geotiff.min.js"></script>
+    <script src="./index.js" type="module"></script>
+    <!-- 当前代码来自[少年啦1997]的开源代码，如果你是购买源码，请联系商家进行退款 -->
+    <style>
+      body {
+        padding: 0;
+        margin: 0;
+        overflow: hidden;
+      }
+      #cesiumContainer {
+        width: 100vw;
+        height: 100vh;
+      }
+
+      /* ===== 顶部工具栏 ===== */
+      #appToolbar {
+        position: fixed;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 9999;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        background: rgba(15, 23, 42, 0.82);
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 10px;
+        padding: 8px 12px;
+        backdrop-filter: blur(6px);
+        font-family: system-ui, sans-serif;
+        user-select: none;
+      }
+      #appToolbar button {
+        appearance: none;
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        background: rgba(30, 41, 59, 0.9);
+        color: #e2e8f0;
+        font-size: 13px;
+        line-height: 1;
+        padding: 8px 14px;
+        border-radius: 7px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+      }
+      #appToolbar button:hover:not(:disabled) {
+        background: rgba(51, 65, 85, 0.95);
+        border-color: #38bdf8;
+      }
+      #appToolbar button.active {
+        background: #0284c7;
+        border-color: #38bdf8;
+        color: #fff;
+      }
+      #appToolbar button.danger-active {
+        background: #b45309;
+        border-color: #fb923c;
+        color: #fff;
+      }
+      #appToolbar button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      #btnUpload {
+        font-weight: 600;
+      }
+
+      /* ===== 状态栏 ===== */
+      #statusBar {
+        position: fixed;
+        left: 50%;
+        bottom: 18px;
+        transform: translateX(-50%);
+        z-index: 9999;
+        max-width: min(86vw, 900px);
+        background: rgba(15, 23, 42, 0.85);
+        color: #cbd5e1;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        border-radius: 8px;
+        padding: 8px 14px;
+        font-size: 12.5px;
+        font-family: system-ui, sans-serif;
+        white-space: pre-wrap;
+        backdrop-filter: blur(6px);
+        pointer-events: none;
+      }
+      #statusBar strong {
+        color: #7dd3fc;
+        font-weight: 600;
+      }
+
+      #fileInput {
+        display: none;
+      }
+
+      .dg.ac {
+        z-index: 9998 !important;
+      }
+    </style>
+  </head>
+
+  <body>
+    <!-- 当前代码来自[少年啦1997]的开源代码，如果你是购买源码，请联系商家进行退款 -->
+    <div id="cesiumContainer"></div>
+
+    <div id="appToolbar">
+      <button id="btnUpload" title="上传 GeoTIFF / PNG / JPG 高程图">📂 上传高程图</button>
+      <button id="btnDraw" title="在模拟范围内绘制降雨区域（左键加点，右键结束）" disabled>🌧 绘制降雨区域</button>
+      <button id="btnWholeRain" title="整个模拟范围均匀降雨" disabled>☁️ 全域降雨</button>
+      <button id="btnClearRegions" title="删除全部降雨区域" disabled>🗑 清空雨区</button>
+    </div>
+
+    <input id="fileInput" type="file" accept=".tif,.tiff,.png,.jpg,.jpeg,.webp,image/tiff,image/png,image/jpeg" />
+
+    <div id="statusBar">
+      正在初始化三维场景…
+    </div>
+  </body>
+</html>

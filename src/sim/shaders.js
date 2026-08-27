@@ -1,0 +1,460 @@
+/**
+ * SPH 流体模拟着色器集合。
+ *
+ * 着色器代码移植自 https://www.shadertoy.com/view/7tSSDD 及 https://www.shadertoy.com/view/l33Sz8，
+ * 由 [少年啦1997] 的开源项目 fluid-sph 移植到 Cesium。
+ * 本文件将原本内联在 index.js 中的着色器字符串抽出，并新增“降雨掩膜注入”能力：
+ *   - uniform sampler2D rainMask : R 通道 ∈[0,1]，按高程图同规格 north-up 位图编码
+ *     各降雨区域的相对强度（全域降雨时可整幅填充）。
+ *   - Simulation() 中每步按 rainIntensity * dt * mask 在粒子所在格累加质量。
+ */
+
+export const sphKernelSource = `
+#define Bi(p) ivec2(mod(p, vec2(float(textureSize))))
+#define texel(a, p) texelFetch(a, Bi(p), 0)
+
+#define range(i,a,b) for(int i = a; i <= b; i++)
+
+const int textureSize = 1024;
+#define dt 1.0
+// 重力参数
+uniform float gravity;
+// 分布直径
+#define dist 1.00
+// 扩散
+#define dif 0.3
+#define difd 0.0
+// 初始质量
+uniform float initialMass;
+
+// 水源控制（保留原版点击点源注水）
+uniform vec2 waterSource;
+uniform float waterSourceRadius;
+uniform float waterAddRate;
+
+// ===== 降雨控制 =====
+// 降雨强度（每步向掩膜非零格累加的质量），由 GUI/全局开关驱动
+uniform float rainIntensity;
+// 降雨掩膜：R 通道 ∈[0,1]，north-up，与高程图同规格
+uniform sampler2D rainMask;
+
+#define border_h 5.
+
+uniform sampler2D heightMap;
+
+// 从heightMap读取地形高度 (替代Perlin噪声)
+float terrainHeight(vec2 pos) {
+    vec2 uv = pos / float(textureSize);
+    uv = clamp(uv, 0.0, 1.0);
+    float h = texture(heightMap, uv).r;
+    // 缩放到合适的范围
+    return h * 4.0;
+}
+
+vec2 terrainGrad(vec2 pos) {
+    const float eps = 1.0;
+    vec2 n = vec2(
+        terrainHeight(pos + vec2(eps, 0.0)) - terrainHeight(pos - vec2(eps, 0.0)),
+        terrainHeight(pos + vec2(0.0, eps)) - terrainHeight(pos - vec2(0.0, eps))
+    ) / (2.0 * eps);
+    return n;
+}
+
+// 估算单元内分布大小
+vec2 destimator(vec2 dx, float M) {
+    return dist * clamp(1.0 - difd * abs(dx), 0.002, 1.0) + dif * dt;
+}
+
+float sdBox(in vec2 p, in vec2 b) {
+    vec2 d = abs(p) - b;
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+}
+
+float border(vec2 p) {
+    vec2 R = vec2(float(textureSize));
+    float bound = -sdBox(p - R * 0.5, R * vec2(0.5, 0.5));
+    return bound;
+}
+
+const float BORDER_STEP = 1.0;
+vec3 bN(vec2 p) {
+    vec3 dx = vec3(-BORDER_STEP, 0.0, BORDER_STEP);
+    vec4 idx = vec4(-1.0 / BORDER_STEP, 0.0, 1.0 / BORDER_STEP, 0.25);
+    vec3 r = idx.zyw * border(p + dx.zy) + idx.xyw * border(p + dx.xy) + idx.yzw * border(p + dx.yz) + idx.yxw * border(p + dx.yx);
+    return vec3(normalize(r.xy), r.z + 1e-4);
+}
+
+vec2 decode(float x) {
+    uint X = floatBitsToUint(x);
+    return unpackSnorm2x16(X);
+}
+
+float encode(vec2 x) {
+    uint X = packSnorm2x16(clamp(x, vec2(-1.0), vec2(1.0)));
+    return uintBitsToFloat(X);
+}
+
+struct particle {
+    vec2 X;
+    vec2 V;
+    vec2 M;
+};
+
+particle getParticle(vec4 data, vec2 pos) {
+    particle P;
+    P.X = decode(data.x) + pos;
+    P.V = decode(data.y);
+    P.M = data.zw;
+    return P;
+}
+
+vec4 saveParticle(particle P, vec2 pos) {
+    P.X = clamp(P.X - pos, vec2(-0.5), vec2(0.5));
+    return vec4(encode(P.X), encode(P.V), P.M);
+}
+
+vec3 hash32(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yxz + 33.33);
+    return fract((p3.xxy + p3.yzz) * p3.zyx);
+}
+
+float G(vec2 x) {
+    return exp(-dot(x, x));
+}
+
+vec3 distribution(vec2 x, vec2 p, vec2 K) {
+    vec4 aabb0 = vec4(p - 0.5, p + 0.5);
+    vec4 aabb1 = vec4(x - K * 0.5, x + K * 0.5);
+    vec4 aabbX = vec4(max(aabb0.xy, aabb1.xy), min(aabb0.zw, aabb1.zw));
+    vec2 center = 0.5 * (aabbX.xy + aabbX.zw);
+    vec2 size = max(aabbX.zw - aabbX.xy, 0.0);
+    float m = size.x * size.y / (K.x * K.y);
+    return vec3(center, m);
+}
+
+// 扩散和平流 - 粒子重积分
+void Reintegration(sampler2D ch, inout particle P, vec2 pos) {
+    range(i, -2, 2) range(j, -2, 2) {
+        vec2 tpos = pos + vec2(i, j);
+        vec4 data = texel(ch, tpos);
+
+        particle P0 = getParticle(data, tpos);
+
+        vec2 dx0 = P0.X - tpos;
+        vec2 difR = destimator(dx0, P0.M.x);
+        P0.X += P0.V * dt;
+
+        vec3 D = distribution(P0.X, pos, difR);
+        float m = P0.M.x * D.z;
+
+        P.X += D.xy * m;
+        P.V += P0.V * m;
+        P.M.y += P0.M.y * m;
+        P.M.x += m;
+    }
+
+    if(P.M.x != 0.0) {
+        P.X /= P.M.x;
+        P.V /= P.M.x;
+        P.M.y /= P.M.x;
+    }
+}
+
+// SPH力计算和积分
+void Simulation(sampler2D ch, inout particle P, vec2 pos,
+                sampler2D rainMask) {
+    vec2 F = vec2(0.0);
+    vec3 avgV = vec3(0.0);
+
+    range(i, -2, 2) range(j, -2, 2) {
+        vec2 tpos = pos + vec2(i, j);
+        vec4 data = texel(ch, tpos);
+        particle P0 = getParticle(data, tpos);
+        vec2 dx = P0.X - P.X;
+        float avgP = gravity * 0.1 * P0.M.x * (P.M.x + P0.M.x);
+        F -= 0.5 * G(1.0 * dx) * avgP * dx;
+        avgV += P0.M.x * G(1.0 * dx) * vec3(P0.V, 1.0);
+    }
+
+    // 地形梯度产生平坦水面
+    F -= gravity * 0.232 * P.M.x * terrainGrad(pos);
+    avgV.xy /= avgV.z;
+
+    // 水源添加（点源）
+    float srcDist = distance(pos / float(textureSize), waterSource);
+    if(srcDist < waterSourceRadius) {
+        P.M.x += waterAddRate * dt;
+    }
+
+    // 降雨注入：掩膜 R 通道编码降雨区域相对强度，持续累加质量进入实时模拟
+    if(rainIntensity > 0.0) {
+        vec2 suv = clamp(pos / float(textureSize), vec2(0.0), vec2(1.0));
+        P.M.x += rainIntensity * dt * texture(rainMask, suv).r;
+    }
+
+    // 积分
+    F -= P.V * 0.0005; // 地面摩擦
+    P.V += F * dt / P.M.x;
+
+    // 边界处理
+    vec3 N = bN(P.X);
+    float vdotN = step(N.z, border_h) * dot(-N.xy, P.V);
+    P.V += 0.5 * (N.xy * vdotN + N.xy * abs(vdotN));
+
+    if(N.z < 0.0)
+        P.V = vec2(0.0);
+
+    // 速度限制
+    float v = length(P.V);
+    P.V /= (v > 1.0) ? v : 1.0;
+}
+
+// 渲染用的工具函数
+vec2 hitBox(vec3 orig, vec3 dir) {
+   const vec3 box_min = vec3(-0.5);
+   const vec3 box_max = vec3(0.5);
+   vec3 inv_dir = 1.0 / dir;
+   vec3 tmin_tmp = (box_min - orig) * inv_dir;
+   vec3 tmax_tmp = (box_max - orig) * inv_dir;
+   vec3 tmin = min(tmin_tmp, tmax_tmp);
+   vec3 tmax = max(tmin_tmp, tmax_tmp);
+   float t0 = max(tmin.x, max(tmin.y, tmin.z));
+   float t1 = min(tmax.x, min(tmax.y, tmax.z));
+   return vec2(t0, t1);
+}
+`;
+
+// SPH BufferA: 粒子初始化和重积分
+export const particleIntegrationSource = `
+uniform sampler2D iChannel0;
+uniform int iFrame;
+
+void main() {
+    vec2 pos = gl_FragCoord.xy;
+
+    // 超出范围则丢弃
+    if(max(pos.x, pos.y) > float(textureSize))
+       discard;
+
+    vec4 data = texel(iChannel0, pos);
+    particle P;
+    P.X = vec2(0.0);
+    P.V = vec2(0.0);
+    P.M = vec2(0.0);
+
+    Reintegration(iChannel0, P, pos);
+
+    // 初始条件
+    if(iFrame < 1) {
+        vec3 rand = hash32(pos + vec2(0.0, 1.0) + 0.28);
+        // 全覆盖初始化：每个格子都带微量“幽灵质量”作为雨水附着载体，
+        // 降雨注入后质量增长成为可见水体并沿地形汇流。
+        // （原版仅 60% 格子有粒子、40% 为空格，降雨场景下会造成附着不全）
+        P.X = pos + 0.3 * (rand.yz - 0.5);
+        P.V = 0.65 * (rand.xy - 0.5);
+        P.M = vec2(max(initialMass, 1e-6), 0.0);
+    }
+
+    out_FragColor = saveParticle(P, pos);
+}
+`;
+
+// SPH BufferB: 物理模拟
+export const particleSimulationSource = `
+uniform sampler2D iChannel0;
+
+void main() {
+    vec2 pos = gl_FragCoord.xy;
+
+    // 超出范围则丢弃
+    if(max(pos.x, pos.y) > float(textureSize))
+       discard;
+
+    vec4 data = texel(iChannel0, pos);
+    particle P = getParticle(data, pos);
+
+    if(P.M.x != 0.0) { // 非真空
+        Simulation(iChannel0, P, pos, rainMask);
+    }
+
+    out_FragColor = saveParticle(P, pos);
+}
+`;
+
+// SPH BufferC: 平滑高度场（用于渲染）
+export const surfaceSmoothingSource = `
+uniform sampler2D iChannel0;
+
+void main() {
+    vec2 pos = gl_FragCoord.xy;
+
+    // 超出范围则丢弃
+    if(max(pos.x, pos.y) > float(textureSize))
+       discard;
+
+    float rho = 0.;
+    float hei = 0.;
+    float weight = 0.0;
+
+    // 平滑高度场
+    range(i, -2, 2) range(j, -2, 2) {
+        vec2 pos0 = pos + vec2(float(i), float(j));
+        vec4 data = texel(iChannel0, pos0);
+        particle P0 = getParticle(data, pos0);
+        vec2 dx = pos - pos0;
+        float w = G(0.75 * dx);
+        weight += w;
+        rho += getParticle(texel(iChannel0, pos0), pos0).M.x * w;
+        hei += terrainHeight(pos0) * w;
+    }
+
+    // 输出: x=水密度(高度), y=地形高度, w=总高度(水+地形)
+    out_FragColor = vec4(rho / weight, hei / weight, 0.0, (rho + hei) / weight);
+}
+`;
+
+// SPH渲染着色器 - 带Fresnel效果和水下颜色衰减
+export const fluidVolumeFragmentSource = `
+uniform sampler2D iChannel0;
+uniform int depth;
+uniform vec3 shallow;
+uniform vec3 deep;
+uniform float waterAlpha;
+in vec3 vo;
+in vec3 vd;
+
+const vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
+// 高度缩放因子：terrainHeight = DEM归一化高程 × 4.0，
+// 4.0 × heightScale 必须等于 1，盒内地形才能与体积盒的绝对高程区间
+// [minElevation, maxElevation] 精确对齐（否则水面会沉入真实地形之下）
+const float heightScale = 0.25;
+
+// 从SPH BufferC获取高度数据
+// 返回: x=地形高度, y=水面高度(地形+水)
+vec2 getHeight(in vec3 p) {
+    vec2 uv = p.xz + 0.5;
+    uv = clamp(uv, 0.0, 1.0);
+    vec4 data = texture(iChannel0, uv);
+    // data.x = 水密度(水高度), data.y = 地形高度, data.w = 总高度
+    float terrainH = data.y * heightScale;
+    float waterH = (data.y + data.x) * heightScale;
+    return vec2(terrainH - 0.5, waterH - 0.5);
+}
+
+// 获取水深
+float getWaterDepth(in vec3 p) {
+    vec2 uv = p.xz + 0.5;
+    uv = clamp(uv, 0.0, 1.0);
+    vec4 data = texture(iChannel0, uv);
+    return data.x * heightScale;
+}
+
+// 计算法线
+vec3 getNormal(in vec3 p, int comp) {
+   float d = 2.0 / float(textureSize);
+    float hMid = (comp == 0) ? getHeight(p).x : getHeight(p).y;
+    float hRight = (comp == 0) ? getHeight(p + vec3(d, 0, 0)).x : getHeight(p + vec3(d, 0, 0)).y;
+    float hTop = (comp == 0) ? getHeight(p + vec3(0, 0, d)).x : getHeight(p + vec3(0, 0, d)).y;
+   return normalize(cross(vec3(0, hTop - hMid, d), vec3(d, hRight - hMid, 0)));
+}
+
+// Fresnel效果
+float fresnel(vec3 viewDir, vec3 normal) {
+    float cosTheta = max(dot(-viewDir, normal), 0.0);
+    // Schlick近似
+    float F0 = 0.02; // 水的Fresnel系数
+    return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+}
+
+vec4 Render(in vec3 ro, in vec3 rd) {
+   vec3 rayDir = normalize(rd);
+   vec2 ret = hitBox(ro, rayDir);
+   if (ret.x > ret.y) discard;
+
+   ret.x = max(ret.x, 0.0);
+
+    // 光线步进找地形
+       float tt = ret.x;
+       for (int i = 0; i < depth; i++) {
+          vec3 p = ro + rd * tt;
+          float h = p.y - getHeight(p).x;
+          if (h < 0.0002 || tt > ret.y)
+          break;
+          tt += h * 0.4;
+        }
+
+    // 光线步进找水面
+       float wt = ret.x;
+           for (int i = 0; i < depth; i++) {
+               vec3 p = ro + rd * wt;
+               float h = p.y - getHeight(p).y;
+               if (h < 0.0002 || wt > min(tt, ret.y))
+               break;
+               wt += h * 0.4;
+           }
+
+    vec3 tc = vec3(0.0);
+    float alpha = 0.0;
+
+    if (wt < ret.y) {
+        vec3 waterPos = ro + rd * wt;
+        float waterDepth = getWaterDepth(waterPos);
+
+        if (waterDepth > 0.001) {
+            vec3 waterNormal = getNormal(waterPos, 1);
+
+            // Fresnel反射
+            float F = fresnel(rayDir, waterNormal);
+
+            // 反射方向
+            vec3 reflectDir = reflect(rayDir, waterNormal);
+
+            // GUI 和常量颜色均为 sRGB；Cesium HDR 光照需要在线性空间中计算
+            vec3 skyColor = mix(
+                czm_gammaCorrect(vec3(0.5, 0.7, 1.0)),
+                czm_gammaCorrect(vec3(0.2, 0.4, 0.8)),
+                reflectDir.y * 0.5 + 0.5
+            );
+
+            // 水下颜色衰减
+            float underwaterDist = min(tt - wt, 0.3);
+            vec3 underwaterColor = exp(-0.18 * vec3(1.0, 0.467, 0.180) * max(underwaterDist * 100.0, 0.0));
+
+            // 基础水颜色（将 GUI 的 sRGB 颜色转为线性颜色后再按深度混合）
+            vec3 waterColor = mix(
+                czm_gammaCorrect(shallow),
+                czm_gammaCorrect(deep),
+                smoothstep(0.0, 0.1, waterDepth)
+            );
+
+            // 高光
+            float spec = pow(max(dot(lightDir, reflectDir), 0.0), 64.0);
+
+            // 混合基础水色和天空反射
+            tc = mix(waterColor * underwaterColor, skyColor, F * 0.5);
+            tc += spec * vec3(1.0) * 0.8;
+
+            // 透明度
+            alpha = mix(0.3, waterAlpha, smoothstep(0.0, 0.05, waterDepth));
+            alpha = mix(alpha, 1.0, F * 0.3 + spec * 0.5);
+        }
+    }
+
+    // 如果没有水但有地形
+    if (alpha < 0.01 && tt < ret.y) {
+        discard;
+    }
+
+       return vec4(tc, alpha);
+}
+
+void main() {
+   vec3 rayDir = normalize(vd);
+   vec4 col = Render(vo, rayDir);
+    if (col.a < 0.01) {
+       discard;
+   }
+   out_FragColor = col;
+}
+`;
