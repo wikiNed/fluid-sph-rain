@@ -1,5 +1,7 @@
 const Cesium = globalThis.Cesium;
 
+import { resolveGeoReference } from "./projection.js";
+
 /** 模拟纹理统一尺寸（与 SPH 管线 textureSize 一致） */
 export const DEM_TEXTURE_SIZE = 1024;
 /** 分析用最大解码尺寸 */
@@ -20,7 +22,9 @@ const ANALYZE_MAX_SIZE = 2048;
 
 /**
  * 加载用户上传的高程文件（tif/tiff/png/jpg/jpeg/webp）。
- * - GeoTIFF：解析地理参考获取覆盖范围；未带地理参考或为投影坐标系时降级为手动放置。
+ * - GeoTIFF：解析地理参考获取覆盖范围；地理坐标系直接用包围盒，投影坐标系
+ *   （UTM / CGCS2000 高斯克吕格 / Lambert 等）经 proj4 换算为经纬度后再定位；
+ *   既无地理参考又无法换算时降级为手动放置。
  * - 普通图片：亮度作为高程，自动检测有效数据边界（剔除纯色边框/透明边）。
  * @param {File|Blob} file
  * @returns {Promise<ElevationData>}
@@ -71,31 +75,28 @@ function sniffTiffMagic(buffer) {
 async function loadGeoTIFF(buffer, name) {
   const tiff = await globalThis.GeoTIFF.fromArrayBuffer(buffer);
   const image = await tiff.getImage();
-  const fileDir = image.getFileDirectory();
+  // 老版 geotiff.js 用 image.fileDirectory（数组 + *Tag 名称）；
+  // 新版 getFileDirectory() 返回普通对象（键 "0","1",…）。两者都试。
+  let fileDir = null;
+  try {
+    fileDir = image.getFileDirectory?.() ?? null;
+  } catch (e) {
+    fileDir = null;
+  }
+  if (!fileDir) fileDir = image.fileDirectory ?? {};
 
   let bbox = null;
-  let extent = null;
-  let bboxIsProjected = false;
   try {
     bbox = image.getBoundingBox(); // [minX, minY, maxX, maxY]
   } catch (e) {
     bbox = null;
   }
 
-  if (bbox && bbox.every(Number.isFinite)) {
-    const [x0, y0, x1, y1] = bbox;
-    // 经纬度合理范围检查；否则视为投影坐标系(米)，暂不支持自动定位到地球
-    if (
-      x0 >= -180.001 && x1 <= 180.001 &&
-      y0 >= -90.001 && y1 <= 90.001 &&
-      x1 > x0 && y1 > y0 &&
-      Math.abs(x1 - x0) < 360
-    ) {
-      extent = [x0, y0, x1, y1];
-    } else {
-      bboxIsProjected = true;
-    }
-  }
+  // 解析地理参考：地理坐标系直接用 bbox；投影坐标系（UTM/CGCS2000 等）
+  // 经 proj4 换算为经纬度范围（见 src/io/projection.js）
+  const geoRef = resolveGeoReference(fileDir, bbox);
+  const extent = geoRef.extent;
+  const bboxIsProjected = geoRef.projected;
 
   // 读取第 0 波段并重采样到模拟纹理尺寸
   const S = DEM_TEXTURE_SIZE;
@@ -135,19 +136,25 @@ async function loadGeoTIFF(buffer, name) {
 
   const canvas = encodeGray(band, rw, rh, min, max);
 
-  const scale = fileDir.ModelPixelScaleTag;
+  // geotiff.js 不同版本的文件目录表示不同：旧版数组 + *Tag 后缀，
+  // 新版普通对象（键 "0","1",…）+ 无后缀名。两种都要兼容。
+  // ModelPixelScale 的单位取决于坐标系：投影坐标系为米，地理坐标系为度。
+  // 用 geoRef.projected 判断而不是数值大小（投影下也可能 <1 m/px）。
+  const scaleVals = tagArray(fileDir, "ModelPixelScaleTag", "ModelPixelScale");
   const pixelInfo =
-    Array.isArray(scale) && scale.length >= 2
-      ? `${scale[0].toFixed(1)}m/px`
+    Array.isArray(scaleVals) && scaleVals.length >= 2
+      ? geoRef.projected
+        ? `${scaleVals[0].toFixed(1)}m/px`
+        : `${scaleVals[0].toFixed(5)}°/px`
       : "未知分辨率";
-  const epsg = extractEPSG(fileDir);
 
-  let info = `GeoTIFF ${epsg ? "(EPSG:" + epsg + ")" : ""} ${pixelInfo}` +
+  let info =
+    `GeoTIFF ${geoRef.crsLabel} ${pixelInfo}` +
     ` 高程 ${formatNum(min)}~${formatNum(max)}m`;
-  if (!extent) {
-    info += bboxIsProjected
-      ? " · 投影坐标系，请手动放置"
-      : " · 缺少地理参考，请手动放置";
+  if (!extent && geoRef.note) {
+    info += ` · ${geoRef.note}`;
+  } else if (extent && geoRef.projected) {
+    info += " · 已自动换算为经纬度";
   }
 
   return {
@@ -157,9 +164,49 @@ async function loadGeoTIFF(buffer, name) {
     minElevation: min,
     maxElevation: max,
     extent,
-    contentAspect: 1,
+    // 无 extent 时用于手动放置：优先用 bbox 的真实宽高比（投影单位为米时可靠），
+    // 否则退化为 1（正方形）
+    contentAspect: pickAspect(bbox, extent),
     info,
   };
+}
+
+/** 估算有效数据区宽高比：有经纬度 extent 用其比例，否则用 bbox 米制比例 */
+function pickAspect(bbox, extent) {
+  if (extent && extent[2] > extent[0] && extent[3] > extent[1]) {
+    // 经度方向随纬度收缩，用中纬度余弦校正后更接近真实形状
+    const midLat = ((extent[1] + extent[3]) / 2) * (Math.PI / 180);
+    const w = (extent[2] - extent[0]) * Math.cos(midLat);
+    const h = extent[3] - extent[1];
+    if (h > 0) return w / h;
+  }
+  if (bbox && bbox[2] > bbox[0] && bbox[3] > bbox[1]) {
+    return (bbox[2] - bbox[0]) / (bbox[3] - bbox[1]);
+  }
+  return 1;
+}
+
+/**
+ * 从 fileDirectory 读取数组形式的值。兼容 geotiff.js 两种表示：
+ *  - 数组（旧版）：直接返回；
+ *  - 对象（新版）：键为 "0","1",… 的普通对象，按数值键序展开为数组。
+ */
+function tagArray(fileDir, ...names) {
+  for (const n of names) {
+    const v = fileDir?.[n];
+    if (v === undefined || v === null) continue;
+    if (Array.isArray(v)) return v;
+    if (typeof v === "object") {
+      const keys = Object.keys(v)
+        .map(Number)
+        .filter((k) => Number.isFinite(k))
+        .sort((a, b) => a - b);
+      if (keys.length) return keys.map((k) => v[k]);
+    } else if (Number.isFinite(v)) {
+      return [v];
+    }
+  }
+  return null;
 }
 
 function resolveNoData(image) {
@@ -170,18 +217,6 @@ function resolveNoData(image) {
   } catch (e) {
     return null;
   }
-}
-
-function extractEPSG(fileDir) {
-  const keys = fileDir.GeoKeyDirectoryTag;
-  if (!Array.isArray(keys)) return null;
-  // GeoKey 目录结构: [版本, 主版本, 次版本, 条目数, (keyID, loc, count, value)*]
-  const count = keys[3];
-  for (let i = 0; i < count; i++) {
-    const off = 4 + i * 4;
-    if (keys[off] === 3072) return keys[off + 3]; // GeographicType / ProjectedCSType
-  }
-  return null;
 }
 
 /* ------------------------------------------------------------------ */

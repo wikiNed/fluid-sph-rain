@@ -157,6 +157,25 @@ try {
   );
   await page.screenshot({ path: path.join(DIR, "shot2_geotiff.png") });
 
+  // ---------- Step2b UTM 投影 GeoTIFF 上传（EPSG:32650）----------
+  console.log("→ 上传 UTM 投影 GeoTIFF…");
+  const fileInputUtm = await page.$("#fileInput");
+  await fileInputUtm.uploadFile(path.join(DIR, "fixture_utm.tif"));
+  await waitFor(
+    () => page.evaluate(() => window.__app.statusText().includes("模拟进行中")),
+    40000,
+    "UTM 自动定位完成",
+  );
+  const ext2b = await page.evaluate(() => window.__app.extent);
+  const utmMatches =
+    Array.isArray(ext2b) &&
+    ext2b.length === 4 &&
+    ext2b.every((v, i) => Math.abs(v - FIXTURE_BBOX[i]) < 0.02); // 与源区域一致
+  record("UTM 投影 GeoTIFF 自动换算范围正确", utmMatches, `extent=${JSON.stringify(ext2b.map(v=>+v.toFixed(4)))}`);
+  const statusText2b = await page.evaluate(() => window.__app.statusText());
+  record("状态栏标注 UTM 投影已换算", /32650|自动换算/.test(statusText2b), statusText2b.replace(/\n/g, " | ").slice(0, 140));
+  await page.screenshot({ path: path.join(DIR, "shot2b_utm.png") });
+
   // ---------- Step3 降雨区域 ----------
   console.log("→ 提交测试雨区并开启降雨…");
   const reg = await page.evaluate(() => window.__app.commitTestRegion());

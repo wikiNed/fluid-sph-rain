@@ -93,6 +93,7 @@ npm test             # node smoke.mjs
 index.html ──┬── Cesium 1.132（内置）
              ├── libs/dat.gui.min.js     GUI 面板
              ├── libs/geotiff.min.js     GeoTIFF 解析（UMD 全局 GeoTIFF）
+             ├── libs/proj4.js           投影坐标系转换（UMD 全局 proj4）
              └── index.js (module)       主控
                     │
    ┌────────────────┼────────────────────────────────┐
@@ -153,7 +154,12 @@ index.html ──┬── Cesium 1.132（内置）
   contentAspect, info }
 ```
 
-- **GeoTIFF 分支**：`GeoTIFF.fromArrayBuffer` → `image.getBoundingBox()` 得 bbox；EPSG:4326 合法范围校验（投影坐标系给出提示后转手动放置）；`readRasters({samples:[0],width:1024,height:1024,resampleMethod:"bilinear"})` 重采样；`getGDALNoData()` 剔除无效像元后统计 min/max；行序保持原栅格（北在上）直接编码画布。
+- **GeoTIFF 分支**：`GeoTIFF.fromArrayBuffer` → `image.getBoundingBox()` 得 bbox → `resolveGeoReference()` 解析地理参考（见下）；`readRasters({samples:[0],width:1024,height:1024,resampleMethod:"bilinear"})` 重采样；`getGDALNoData()` 剔除无效像元后统计 min/max；行序保持原栅格（北在上）直接编码画布。
+- **地理参考解析**（`src/io/projection.js`，`resolveGeoReference(fileDir, bbox)`）：区分两种坐标系——
+  - **地理坐标系**（`GTModelType=2`，或 bbox 落在经纬度合法区间）：bbox 直接作为 extent，单位显示为 `°/px`；
+  - **投影坐标系**（`GTModelType=1`）：先看 `ProjectedCSType` GeoKey 的 EPSG 编码是否被 proj4 内置（WGS84 UTM 326xx/327xx、3857 等）；不内置（如 CGCS2000 的 EPSG:4490/4547）则按 `ProjCoordTrans` + `ProjNatOriginLong/Lat`、`ProjFalseEasting/Northing`、`ProjScaleAtNatOrigin`、`ProjStdParallel1/2` 现场拼 `+proj=…` 定义串，椭球按 `GeographicType` 映射（4490/4258/4269→GRS80、4267→clrk66、其余→WGS84）。换算用 **7×7 网格采样**取经纬度外包，而非只取四角——横轴墨卡托下经度沿东西向非线性，只取角点会失真。
+  - **兼容性坑**：geotiff.js 各版本 `fileDirectory` 表示不同——旧版是数组且 tag 名带 `Tag` 后缀（`ModelPixelScaleTag`），新版返回普通对象（键为 `"0","1",…`）且名无后缀（`ModelPixelScale`）。`asIndexed()` / `tagArray()` 两种都归一化，否则 GeoKey 全部解析为空、投影图纸被误判"未知投影"。
+  - 换算失败或无地理参考时 `extent=null`，走手动放置并给出具体原因（`geoRef.note`）。
 - **普通图片分支**：`createImageBitmap` → 缩到 ≤2048 分析 → `detectContentBounds()` 识别纯色边框/透明边并裁剪（边缘环取主色调，占比 >40% 才认定为边框；裁剪面积 <4% 或 >99.5% 放弃裁剪防误判）→ 亮度转灰度 → 默认高程 0~1000m。
 - **手动放置 + 贴地**：`index.js#placePendingDemAtDegrees` 点击中心后，`rectangleAroundCenter` 按放置宽度算 bbox（经度除 cos(纬度)），再 `sampleTerrainMostDetailed` 采样四角+中心真实高程，`min/max = 地面 -0.1/×0.9 × reliefMeters`，保证盒子浮在真实地表上而非埋入地下。
 
@@ -228,13 +234,21 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
 | 文件 | 作用 |
 |------|------|
 | `server.mjs` | 静态服务器 :8931（服务仓库根目录） |
-| `smoke.mjs` | 15 项断言冒烟测试，输出截图 + `report.json` |
-| `make_tiff.mjs` | 生成合成 GeoTIFF 夹具（128²、EPSG:4326、北亮南暗渐变，用于方向/定位验证） |
-| `fixture_dem.tif` | 上述脚本的产物（已提交，bbox=[116.2,39.82,116.44,40.06]） |
+| `smoke.mjs` | 18 项断言冒烟测试（含 UTM 投影夹具），输出截图 + `report.json` |
+| `make_tiff.mjs` | 生成两份合成 GeoTIFF 夹具：EPSG:4326 与 EPSG:32650(UTM50N)，128²、北亮南暗渐变，两者覆盖同一经纬度范围以便交叉验证 |
+| `probe_projection.mjs` | 投影解析纯 Node 单测（7 项）：EPSG:4326 直通、无标签拒判、EPSG:32650 换算、CGCS2000 GK 现场构造定义、退化 bbox 拒绝 |
+| `fixture_dem.tif` | 夹具 A 产物（已提交，bbox=[116.2,39.82,116.44,40.06]） |
+| `fixture_utm.tif` | 夹具 B 产物（EPSG:32650，与 A 同覆盖范围，用于验证跨坐标系一致性） |
 | `verify_fix.mjs` / `verify_align2.mjs` | 视觉验证脚本（非对称雨区 + 多机位截图） |
 | `diag_terrain.mjs` | 检查 terrainProvider/影像层数 |
 
-**断言清单**：页面 ready → Viewer 创建 → 示例自动加载且范围精确匹配 → 模拟构建 → 无着色器错误 → GeoTIFF 自动解析 bbox 精确匹配 → 雨区划定/掩膜生成 → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确 → 无致命控制台错误。
+**断言清单**：页面 ready → Viewer 创建 → 示例自动加载且范围精确匹配 → 模拟构建 → 无着色器错误 → GeoTIFF 自动解析 bbox 精确匹配 → **UTM 投影 GeoTIFF 自动换算范围与同区域地理坐标夹具一致** → 雨区划定/掩膜生成 → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确 → 无致命控制台错误。
+
+**Node 侧单测**（无需浏览器，秒级）：
+
+```powershell
+node test/probe_projection.mjs
+```
 
 **无头浏览器启动**（本仓库开发时的沙箱环境需要，普通开发机可直接 `puppeteer.launch`）：
 
@@ -259,7 +273,7 @@ chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<dir> `
 
 ## 9. 已知限制与 TODO
 
-- **投影坐标系 GeoTIFF**（UTM 等）：bbox 非经纬度 → 转手动放置流程，未做投影转换（可引入 proj4js 解析 GeoKey 自动转换）。
+- **投影坐标系 GeoTIFF（UTM / CGCS2000 高斯克吕格 / Lambert 等）**：✅ 已实现自动换算。`src/io/projection.js` 通过 GeoKey 解析 → proj4 转换，覆盖 WGS84 UTM（proj4 内置 326xx/327xx）与需要现场构造定义的中国 CGCS2000 系列（EPSG:4490 等），无地理参考或换算失败时降级手动放置并说明原因。
 - **降雨无物理蒸发/下渗**：纯质量守恒，长期降雨会持续堆积至盒顶。
 - **单精度掩膜 8bit**：区域强度 0~2 映射到 0~255，重叠取 max，不支持叠加复合语义。
 - **雨区顶点编辑**：暂不支持拖拽顶点/整体平移，只能删除重建。
@@ -277,10 +291,12 @@ fluid-sph-rain/
 │   │   ├── shaders.js          SPH 着色器（rainMask 注入/幽灵初始化/heightScale）
 │   │   ├── rainMask.js         雨区多边形 → 掩膜画布（lighten 合成）
 │   │   └── geoUtils.js         四空间坐标换算（§5.1 约定的唯一实现处）
-│   ├── io/elevationLoader.js   GeoTIFF/图片解析 + 边界检测 + NoData
+│   ├── io/
+│   │   ├── elevationLoader.js  GeoTIFF/图片解析 + 边界检测 + NoData
+│   │   └── projection.js       地理参考解析：GeoKey → proj4 → 经纬度 extent
 │   ├── ui/rainRegionEditor.js  降雨区域交互绘制/管理
 │   └── render/                 原版渲染阶段（FluidCompute/Volume Stage、纹理工厂）
-├── libs/                       dat.gui / geotiff（本地化，离线可用）
+├── libs/                       dat.gui / geotiff / proj4（本地化，离线可用）
 ├── static/                     内置示例高程图（含作者水印）
 ├── docs/images/                本文档截图
 ├── test/                       无头浏览器测试（见 §7）

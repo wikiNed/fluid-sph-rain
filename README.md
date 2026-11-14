@@ -13,7 +13,11 @@
 - 顶部工具栏「📂 上传高程图」或 GUI「高程数据 → 上传高程图」，支持 `.tif / .tiff / .png / .jpg / .jpeg / .webp`。
 - **GeoTIFF**：自动读取地理参考（ModelTiepoint / ModelPixelScale / GeoKeyDirectory），
   解析出经纬度覆盖范围，飞行定位并将高程图叠置显示在对应区域，绘制模拟范围边框与标注。
-  - 覆盖 WGS84 经纬度（EPSG:4326 系）数据；投影坐标系（如 UTM）会提示手动放置。
+  - **地理坐标系**（EPSG:4326 系）：包围盒直接作为经纬度范围。
+  - **投影坐标系**（UTM、CGCS2000 高斯克吕格、Lambert 等）：通过 GeoKey 解析 + proj4
+    自动换算为经纬度后定位，无需手动放置。WGS84 UTM（EPSG:326xx/327xx）与
+    中国 CGCS2000 系列（如 EPSG:4490 / 4547）均已覆盖；
+    仅当缺少地理参考或换算失败时才降级为手动放置，并在状态栏说明原因。
   - 自动剔除 NoData 像元后再统计高程范围。
 - **普通图片**：亮度即高程；自动检测并裁剪纯色/透明边框得到有效数据区，
   随后进入手动放置流程——在底图上单击一点作为模拟区域中心，
@@ -64,9 +68,11 @@ src/sim/shaders.js             SPH 着色器（含 rainMask 降雨注入）
 src/sim/geoUtils.js            经纬度 ⇄ 纹理UV ⇄ 画布像素 的统一换算约定
 src/sim/rainMask.js            雨区多边形 → 降雨掩膜画布（lighten 合成）
 src/io/elevationLoader.js      GeoTIFF/普通图片解析与覆盖范围自动分析
+src/io/projection.js           地理参考解析：GeoKey → proj4 → 经纬度覆盖范围
 src/ui/rainRegionEditor.js     降雨区域交互绘制与管理
 src/render/FluidPipelineStages.js   原版 Compute/Volume 渲染阶段
 libs/geotiff.min.js            GeoTIFF 解析库（jsdelivr 构建）
+libs/proj4.js                  投影坐标系转换库（jsdelivr 构建）
 static/1722500831109.png       内置示例高程图
 ```
 
