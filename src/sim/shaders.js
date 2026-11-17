@@ -12,6 +12,8 @@
 export const sphKernelSource = `
 #define Bi(p) ivec2(mod(p, vec2(float(textureSize))))
 #define texel(a, p) texelFetch(a, Bi(p), 0)
+// 整数像素采样（无隐式导数 dFdx/dFdy，规避 ANGLE/D3D11 延迟编译对 texture() 的竞态）
+#define texelC(a, p) texelFetch(a, clamp(ivec2(p), ivec2(0), ivec2(textureSize - 1)), 0)
 
 #define range(i,a,b) for(int i = a; i <= b; i++)
 
@@ -44,23 +46,24 @@ uniform sampler2D domainMask;
 // 是否启用模拟域约束（0=退回原始矩形盒边界，1=启用多边形域）
 uniform float domainEnabled;
 
-// 采样模拟域（域内≈1，域外≈0）
+// 采样模拟域（域内≈1，域外≈0）——整数像素采样，规避 texture() 隐式导数。
+// 注意 ANGLE/D3D11 兼容：含 texelFetch 的函数里绝不能放条件 early return，
+// 也不要把 step(uniform) 乘进采样结果，否则 GLSL→HLSL 翻译会生成非法 HLSL，
+// 表现为 "Fragment shader failed to compile" + 空编译日志（真机 GPU 才复现，
+// SwiftShader 正常）。未启用域时绑定全白纹理，采样天然返回 1.0，无需额外判断。
 float domainAt(vec2 worldPos) {
-    if(domainEnabled < 0.5) return 1.0;
-    vec2 uv = clamp(worldPos / float(textureSize), vec2(0.0), vec2(1.0));
-    return texture(domainMask, uv).r;
+    return texelC(domainMask, worldPos).r;
 }
 
 // 模拟域边界法向（指向域内）。基于掩膜梯度，仅用于边界附近。
+// 全白掩膜下四邻相等 → 梯度为 0，无需 domainEnabled 判断。
 vec2 domainNormal(vec2 worldPos) {
-    if(domainEnabled < 0.5) return vec2(0.0);
-    vec2 uv = clamp(worldPos / float(textureSize), vec2(0.0), vec2(1.0));
-    float e = 2.0 / float(textureSize);
-    float l = texture(domainMask, uv - vec2(e, 0.0)).r;
-    float r = texture(domainMask, uv + vec2(e, 0.0)).r;
-    float d = texture(domainMask, uv - vec2(0.0, e)).r;
-    float u = texture(domainMask, uv + vec2(0.0, e)).r;
-    return vec2(r - l, u - d); // 指向域内（值增大方向）
+    vec2 p = clamp(worldPos, vec2(0.0), vec2(float(textureSize - 1)));
+    float l = texelC(domainMask, p - vec2(2.0, 0.0)).r;
+    float r = texelC(domainMask, p + vec2(2.0, 0.0)).r;
+    float d = texelC(domainMask, p - vec2(0.0, 2.0)).r;
+    float u = texelC(domainMask, p + vec2(0.0, 2.0)).r;
+    return vec2(r - l, u - d);
 }
 
 #define border_h 5.
@@ -215,8 +218,8 @@ void Simulation(sampler2D ch, inout particle P, vec2 pos,
     // 降雨注入：掩膜 R 通道编码降雨区域相对强度，持续累加质量进入实时模拟。
     // 乘域掩膜保证全域降雨也只落在模拟域内（域外不注水）。
     if(rainIntensity > 0.0) {
-        vec2 suv = clamp(pos / float(textureSize), vec2(0.0), vec2(1.0));
-        P.M.x += rainIntensity * dt * texture(rainMask, suv).r * texture(domainMask, suv).r;
+        vec2 sp = clamp(pos, vec2(0.0), vec2(float(textureSize - 1)));
+        P.M.x += rainIntensity * dt * texelC(rainMask, sp).r * texelC(domainMask, sp).r;
     }
 
     // 积分
@@ -233,12 +236,9 @@ void Simulation(sampler2D ch, inout particle P, vec2 pos,
 
     // ===== 模拟域边界约束（多边形域，水被限制在域内） =====
     if(domainEnabled > 0.5) {
-        vec2 duv = clamp(P.X / float(textureSize), vec2(0.0), vec2(1.0));
-        float dom = texture(domainMask, duv).r;
+        float dom = texelC(domainMask, P.X).r;
         if(dom < 0.5) {
-            // 域外：质量快速衰减（域外不积水，_LINEAR 过渡带 <0.1 直接清零）
             P.M.x *= mix(0.85, 0.0, step(dom, 0.1));
-            // 沿域法向（指向域内）把速度反射回去
             vec2 dn = domainNormal(P.X);
             float dnLen = length(dn);
             if(dnLen > 0.001) {

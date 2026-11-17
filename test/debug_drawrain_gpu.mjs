@@ -1,0 +1,36 @@
+import puppeteer from "puppeteer-core";
+const browser = await puppeteer.connect({ browserURL: "http://127.0.0.1:9223", defaultViewport: { width: 1500, height: 850 }, protocolTimeout: 180000 });
+const page = await browser.newPage();
+const logs = [];
+page.on("console", (m) => logs.push({ type: m.type(), text: m.text() }));
+page.on("pageerror", (e) => logs.push({ type: "PAGEERROR", text: String(e?.stack || e) }));
+const dumpErrs = (label) => {
+  const errs = logs.filter((l) => /error|shader|compile|fail|PAGEERROR|gl_/i.test(l.text));
+  console.log(`--- ${label}: ${errs.length} error-ish logs`);
+  for (const l of errs.slice(0, 6)) console.log(`  [${l.type}] ${l.text.slice(0, 400)}`);
+  return errs.length;
+};
+await page.goto("http://127.0.0.1:8931/index.html?cb=" + Date.now(), { waitUntil: "domcontentloaded", timeout: 60000 });
+await page.waitForFunction(() => window.__app?.ready === true, { timeout: 60000 });
+console.log("patch installed:", await page.evaluate(() => !!WebGL2RenderingContext.prototype.compileShader.__dshSyncPatch));
+console.log("GPU info:", await page.evaluate(() => {
+  const c = document.createElement("canvas").getContext("webgl2");
+  const ext = c?.getExtension("WEBGL_debug_renderer_info");
+  return ext ? c.getParameter(ext.UNMASKED_RENDERER_WEBGL) : (c ? c.getParameter(c.RENDERER) : "no webgl2");
+}));
+dumpErrs("after load");
+console.log("=== commit globe domain ===");
+await page.evaluate(() => { window.__app.options.globeSampleGrid = 32; });
+const dom = await page.evaluate(() => window.__app.commitGlobeDomain([-119.55, 37.74, -119.47, 37.80]));
+console.log("domain:", JSON.stringify(dom));
+await new Promise((r) => setTimeout(r, 2500));
+dumpErrs("after domain");
+console.log("=== click 绘制降雨区域 ===");
+logs.length = 0;
+await page.evaluate(() => document.getElementById("btnDraw")?.click());
+await new Promise((r) => setTimeout(r, 2000));
+dumpErrs("after draw-rain click");
+const dlg = await page.evaluate(() => [...document.querySelectorAll("body *")].filter((e) => /An error occurred while rendering/.test(e.textContent || "") && e.children.length === 0).length);
+console.log("error dialog:", dlg);
+await page.screenshot({ path: "test/shot_gpu_drawrain.png" });
+await browser.disconnect();

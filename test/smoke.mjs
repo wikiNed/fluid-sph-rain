@@ -264,7 +264,7 @@ try {
   const fatalErrors = consoleErrors.filter(
     (e) =>
       /PAGEERROR/i.test(e) ||
-      /Shader.*error|gl\w*Error|Failed to link|compile error/i.test(e),
+      /Shader.*error|gl\w*Error|Failed to link|compile error|failed to compile|translation failed|Fragment shader failed|An error occurred while rendering/i.test(e),
   );
   record("无致命控制台错误", fatalErrors.length === 0, fatalErrors.slice(0, 3).join(" ; "));
 } catch (err) {
