@@ -1,10 +1,10 @@
 /**
- * fluid-sph 改造版冒烟测试（含「先划模拟域 → 再划雨区」流程）：
- *  1) 页面加载：Cesium 初始化、示例数据解析出覆盖范围，停在「请划定模拟域」
- *  2) 提交测试模拟域 → 生成域掩膜 → 启动流体 → 域掩膜纹理与开关就绪
- *  3) 上传合成 GeoTIFF（EPSG:4326）→ 自动解析范围 → 再划域 → 启动
- *  4) UTM 投影 GeoTIFF（EPSG:32650）→ 自动换算范围 → 再划域 → 启动
- *  5) 域内雨区成功 / 域外雨区被拒 → 开启降雨 → 注入量持续累加
+ * fluid-sph 改造版冒烟测试（含「全球地形直接划域 → 域内降雨」新流程，以及上传高程图可选入口）：
+ *  1) 页面加载：Cesium 初始化，默认进入全球地形模式（无 DEM/无流体）
+ *  2) 全球模式画多边形 → 采样真实地形 → 生成域掩膜 → 启动流体
+ *  3) 域内雨区成功 / 域外雨区被拒 → 降雨注入累加 / 停止后不增长
+ *  4) 上传合成 GeoTIFF（EPSG:4326）→ 解析范围 → 划域 → 启动
+ *  5) UTM 投影 GeoTIFF（EPSG:32650）→ 换算范围 → 划域 → 启动
  *  6) 无地理参考 PNG → 手动放置 → 划域 → 启动
  * 输出截图与 JSON 报告。
  */
@@ -18,10 +18,8 @@ const CHROME =
   process.env.CHROME_PATH ??
   "C:/Program Files/Google/Chrome/Application/chrome.exe";
 
-const SAMPLE_EXTENT = [
-  -119.5509508318, 37.7379837881, -119.4661638949, 37.8045600379,
-];
 const FIXTURE_BBOX = [116.2, 39.82, 116.44, 40.06];
+const GLOBE_BBOX = [-119.55, 37.74, -119.47, 37.80]; // Tuolumne 山区，真实高程起伏大
 
 const results = [];
 const consoleErrors = [];
@@ -94,7 +92,7 @@ try {
     }
   });
 
-  // ---------- Step1 加载：应停在「请划定模拟域」 ----------
+  // ---------- Step1 加载：默认全球地形模式 ----------
   console.log("→ 打开页面…");
   await page.goto("http://127.0.0.1:8931/index.html", {
     waitUntil: "domcontentloaded",
@@ -116,34 +114,70 @@ try {
     hasFluid: !!window.__app.fluid,
     status: window.__app.statusText(),
     hasDomain: window.__app.hasDomain(),
+    hasGlobeBtn: !!document.getElementById("btnGlobe"),
+    domainBtnEnabled: document.getElementById("btnDomain")?.disabled === false,
   }));
   record("Cesium Viewer 已创建", step1.hasViewer);
-  record(
-    "示例数据覆盖范围解析正确",
-    Array.isArray(step1.extent) &&
-      step1.extent.length === 4 &&
-      step1.extent.every((v, i) => Math.abs(v - SAMPLE_EXTENT[i]) < 1e-6),
-    `extent=${JSON.stringify(step1.extent)}`,
-  );
-  record("上传后停在划定模拟域阶段（尚未启动模拟）", !step1.hasFluid && /划定模拟域|请划定/.test(step1.status), step1.status.replace(/\n/g, " | ").slice(0, 120));
-  record("此时无模拟域", step1.hasDomain === false);
+  record("默认进入全球地形模式（尚未启动模拟）", /全球地形模式/.test(step1.status) && !step1.hasFluid, step1.status.replace(/\n/g, " | ").slice(0, 90));
+  record("此时无模拟域/无覆盖范围", step1.hasDomain === false && !step1.extent);
+  record("全球地形按钮存在且划域按钮可用", step1.hasGlobeBtn && step1.domainBtnEnabled);
 
-  // 提交矩形测试模拟域 → 启动模拟
-  const dom1 = await page.evaluate(() => window.__app.commitTestDomain(0.12, 0.12));
-  record("提交模拟域成功（域掩膜生成 + 域约束开启）", dom1.ok === true && dom1.hasMask === true && dom1.domainEnabled === true, JSON.stringify(dom1));
+  // ---------- Step2 全球模式划域 → 采样真实地形 → 启动 ----------
+  console.log("→ 全球地形模式划域（采样真实高程）…");
+  await page.evaluate(() => { window.__app.options.globeSampleGrid = 32; });
+  const dom1 = await page.evaluate(() => window.__app.commitGlobeDomain(
+    [-119.55, 37.74, -119.47, 37.80],
+    [[0.08,0.08],[0.92,0.10],[0.95,0.90],[0.50,0.95],[0.05,0.60]],
+  ));
+  record("全球模式划域成功（真实地形采样 + 域掩膜 + 域约束）", dom1.ok === true && dom1.hasMask === true && dom1.domainEnabled === true, JSON.stringify(dom1));
+  record("模拟域顶点=5（任意多边形）", dom1.vertices === 5, `vertices=${dom1.vertices}`);
+  record("模拟范围=所画多边形bbox", Math.abs(dom1.extent[0] - GLOBE_BBOX[0]) < 0.02 && Math.abs(dom1.extent[3] - GLOBE_BBOX[3]) < 0.02, `extent=${dom1.extent?.map((v)=>+v.toFixed(3))}`);
+  record("来源模式=globe", dom1.sourceMode === "globe", dom1.sourceMode);
   const running1 = await page.evaluate(() => ({
     hasFluid: !!window.__app.fluid,
     hasDomain: window.__app.hasDomain(),
     status: window.__app.statusText(),
   }));
-  record("模拟域提交后流体启动", running1.hasFluid && running1.hasDomain && /模拟进行中/.test(running1.status), running1.status.replace(/\n/g, " | ").slice(0, 100));
+  record("全球划域后流体启动", running1.hasFluid && running1.hasDomain && /模拟进行中/.test(running1.status), running1.status.replace(/\n/g, " | ").slice(0, 100));
 
-  await sleep(2500); // 渲染若干帧
-  await page.screenshot({ path: path.join(DIR, "shot1_sample.png") });
+  await sleep(2500);
+  await page.screenshot({ path: path.join(DIR, "shot1_globe.png") });
   const errBeforeUpload = consoleErrors.filter((e) => /shader|webgl/i.test(e));
   record("无着色器编译错误(阶段1)", errBeforeUpload.length === 0, errBeforeUpload[0] ?? "");
 
-  // ---------- Step2 GeoTIFF 上传（EPSG:4326） ----------
+  // ---------- Step3 雨区：域内成功 / 域外被拒 ----------
+  console.log("→ 提交测试雨区并开启降雨…");
+  const before = await page.evaluate(() => window.__app.activeRegions());
+  await page.evaluate(() => window.__app.commitRegionUV([[0.02,0.02],[0.08,0.02],[0.08,0.08],[0.02,0.08]]));
+  const afterOutside = await page.evaluate(() => window.__app.activeRegions());
+  record("域外雨区被拒绝", afterOutside === before, `before=${before} after=${afterOutside}`);
+  const reg = await page.evaluate(() => window.__app.commitTestRegion());
+  record("域内降雨区域划定成功(活动数≥1)", reg.active >= 1 && reg.ok, JSON.stringify(reg));
+  record("降雨掩膜纹理已生成", reg.hasMask === true);
+
+  await page.evaluate(() => { window.__app.options.rainEnabled = true; });
+  const injected = await waitFor(
+    async () => {
+      const v = await page.evaluate(() => window.__app.injectedAmount());
+      return v > 0.05 ? v : false;
+    },
+    25000,
+    "注入量>0.05",
+  );
+  record("降雨持续注入并累加", injected > 0.05, `累计=${injected.toFixed(3)}`);
+  await page.screenshot({ path: path.join(DIR, "shot3_raining.png") });
+
+  await page.evaluate(() => { document.getElementById("btnWholeRain").click(); });
+  const wholeOn = await page.evaluate(() => window.__app.options.wholeAreaRain === true);
+  record("全域降雨开关生效", wholeOn);
+  await page.evaluate(() => { document.getElementById("btnWholeRain").click(); });
+  await page.evaluate(() => { window.__app.options.rainEnabled = false; });
+  const a = await page.evaluate(() => window.__app.injectedAmount());
+  await sleep(1200);
+  const b = await page.evaluate(() => window.__app.injectedAmount());
+  record("停止降雨后注入停止增长", b - a < 0.002, `${a.toFixed(3)} -> ${b.toFixed(3)}`);
+
+  // ---------- Step4 GeoTIFF 上传（EPSG:4326） ----------
   console.log("→ 上传合成 GeoTIFF…");
   const fileInput = await page.$("#fileInput");
   await fileInput.uploadFile(path.join(DIR, "fixture_dem.tif"));
@@ -163,7 +197,7 @@ try {
   await page.evaluate(() => window.__app.commitTestDomain(0.12, 0.12));
   await page.screenshot({ path: path.join(DIR, "shot2_geotiff.png") });
 
-  // ---------- Step2b UTM 投影 GeoTIFF 上传（EPSG:32650）----------
+  // ---------- Step5 UTM 投影 GeoTIFF 上传（EPSG:32650）----------
   console.log("→ 上传 UTM 投影 GeoTIFF…");
   const fileInputUtm = await page.$("#fileInput");
   await fileInputUtm.uploadFile(path.join(DIR, "fixture_utm.tif"));
@@ -183,44 +217,7 @@ try {
   await page.evaluate(() => window.__app.commitTestDomain(0.12, 0.12));
   await page.screenshot({ path: path.join(DIR, "shot2b_utm.png") });
 
-  // ---------- Step3 雨区：域内成功 / 域外被拒 ----------
-  console.log("→ 提交测试雨区并开启降雨…");
-  // 域外雨区（uv 0.02~0.08，在域 [0.12,0.88] 之外）应被拒绝
-  const before = await page.evaluate(() => window.__app.activeRegions());
-  await page.evaluate(() => window.__app.commitRegionUV([[0.02,0.02],[0.08,0.02],[0.08,0.08],[0.02,0.08]]));
-  const afterOutside = await page.evaluate(() => window.__app.activeRegions());
-  record("域外雨区被拒绝", afterOutside === before, `before=${before} after=${afterOutside}`);
-
-  const reg = await page.evaluate(() => window.__app.commitTestRegion());
-  record("域内降雨区域划定成功(活动数≥1)", reg.active >= 1 && reg.ok, JSON.stringify(reg));
-  record("降雨掩膜纹理已生成", reg.hasMask === true);
-
-  await page.evaluate(() => { window.__app.options.rainEnabled = true; });
-  const injected = await waitFor(
-    async () => {
-      const v = await page.evaluate(() => window.__app.injectedAmount());
-      return v > 0.05 ? v : false;
-    },
-    25000,
-    "注入量>0.05",
-  );
-  record("降雨持续注入并累加", injected > 0.05, `累计=${injected.toFixed(3)}`);
-  await sleep(2000);
-  await page.screenshot({ path: path.join(DIR, "shot3_raining.png") });
-
-  // 全域降雨切换（域外不注水由域掩膜保证）
-  await page.evaluate(() => { document.getElementById("btnWholeRain").click(); });
-  const wholeOn = await page.evaluate(() => window.__app.options.wholeAreaRain === true);
-  record("全域降雨开关生效", wholeOn);
-  await page.evaluate(() => { document.getElementById("btnWholeRain").click(); });
-
-  await page.evaluate(() => { window.__app.options.rainEnabled = false; });
-  const a = await page.evaluate(() => window.__app.injectedAmount());
-  await sleep(1200);
-  const b = await page.evaluate(() => window.__app.injectedAmount());
-  record("停止降雨后注入停止增长", b - a < 0.002, `${a.toFixed(3)} -> ${b.toFixed(3)}`);
-
-  // ---------- Step4 无地理参考 PNG 手动放置 ----------
+  // ---------- Step6 无地理参考 PNG 手动放置 ----------
   console.log("→ 构造无边框 PNG 并走手动放置流程…");
   await page.evaluate(async () => {
     const S = 256;
@@ -244,7 +241,6 @@ try {
     "进入手动放置模式",
   );
   record("无参考图片触发手动放置提示", true);
-
   await page.evaluate(() => window.__app.testPlaceAt(110.0, 34.5));
   await waitFor(
     () => page.evaluate(() => window.__app.statusText().includes("请划定模拟域")),

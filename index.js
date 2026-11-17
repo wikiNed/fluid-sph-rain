@@ -11,6 +11,7 @@ import {
   fluidVolumeFragmentSource,
 } from "./src/sim/shaders.js";
 import { loadElevationFile } from "./src/io/elevationLoader.js";
+import { sampleTerrainDem } from "./src/io/terrainSampler.js";
 import { RainRegionEditor } from "./src/ui/rainRegionEditor.js";
 import { DomainEditor } from "./src/ui/domainEditor.js";
 import { rasterizeRainMask } from "./src/sim/rainMask.js";
@@ -65,6 +66,7 @@ const options = {
   // —— 新增：数据放置 ——
   placementWidthKm: 10.0, // 无地理参考图片的手动放置宽度
   reliefMeters: 600, // 无地理参考图片的地形起伏跨度(米)，盒子将贴合真实地表
+  globeSampleGrid: 96, // 全球地形模式的采样网格边长（越大越精细但越慢，32~160）
 
   // —— 新增：降雨控制 ——
   rainEnabled: false, // 降雨总开关
@@ -95,6 +97,8 @@ const state = {
   pendingDomainDem: null,
   /** 已提交的模拟域 {simPoly, cartos, label} */
   domain: null,
+  /** 数据来源模式：'globe'=直接在当前全球地形上划域（默认）；'upload'=上传/示例/放置高程图 */
+  sourceMode: "globe",
   drapeLayer: null,
   /** 模拟范围矩形/标签等 UI 实体，随模拟重建一起清理 */
   uiEntities: [],
@@ -205,12 +209,12 @@ async function initViewer() {
     },
   });
 
-  // 模拟域编辑器（上传高程图后、启动模拟前划定）
+  // 模拟域编辑器（默认全球地形模式：直接在全球地形上划域；上传高程图后限定在该范围内）
   domainEditor = new DomainEditor(viewer, {
     onChange: (domain) => {
       if (!domain) return;
       state.domain = domain;
-      // 提交模拟域 → 生成掩膜 → 启动模拟
+      // 提交模拟域 → 生成掩膜 → 启动模拟（全球模式会先采样真实地形高程）
       onDomainCommitted(domain);
     },
     onStatus: (t) => setStatus(`<strong>划定模拟域</strong><br>${t}`),
@@ -256,11 +260,11 @@ async function initViewer() {
   buildGui();
 
   setStatus(
-    `✅ 场景就绪（${baseLayerMessage}）。点击「📂 上传高程图」或「加载示例数据」开始。`,
+    `✅ 场景就绪（${baseLayerMessage}）。当前为<strong>全球地形模式</strong>：直接在地形上划一个区域即可开始模拟；也可「📂 上传高程图」使用自有 DEM。`,
   );
 
-  // 自动加载内置示例，保证打开即有演示效果
-  await loadSample();
+  // 默认进入「全球地形直接划域」模式：无需上传数据，打开即可用
+  startGlobalDomainDraw();
 }
 
 /** 在 (lon,lat) 处放置待定位的高程数据并启动模拟（手动放置流程） */
@@ -357,6 +361,32 @@ async function handleUploadFile(file) {
 }
 
 /**
+ * 全球地形模式：直接用当前加载的真实地形（ArcGIS/Cesium）作为数据源。
+ * 无需上传高程图 —— 用户划域后，系统采样该多边形 bbox 内的真实高程构建 DEM。
+ */
+function startGlobalDomainDraw() {
+  teardownSimulation(true);
+  state.sourceMode = "globe";
+  state.pendingDomainDem = null;
+  state.demInfo = "全球真实地形（ArcGIS / Cesium）";
+
+  // 全球模式不飞相机、不叠置 DEM，用户就在当前视野里画多边形
+  domainEditor.startDrawing(null); // null → 自由绘制，提交时由 bbox 反推 extent
+  dom.btnDomain?.classList.add("active");
+  refreshButtons();
+
+  const provider = viewer.terrainProvider;
+  const pname = provider
+    ? provider.constructor?.name || (provider.ready ? "地形服务" : "地形服务")
+    : "椭球面";
+  setStatus(
+    `🌐 <strong>全球地形模式</strong><br>当前地形：<strong>${pname}</strong><br>` +
+      `左键在地形上任意位置添加顶点，右键 / 双击 / 回车闭合（至少 3 点），Esc 取消。<br>` +
+      `提交后自动采样该区域的真实高程并启动模拟（也可用「📂 上传高程图」改用自有数据）。`,
+  );
+}
+
+/**
  * 高程数据就绪后：显示 DEM 叠置，等待用户划定模拟域，再启动模拟。
  * 模拟域为高程图覆盖范围内的任意多边形。
  */
@@ -367,6 +397,7 @@ async function prepareDomain(dem) {
   }
   // 换数据时重建模拟环境（清空旧流体/雨区/域）
   teardownSimulation(true);
+  state.sourceMode = "upload";
   state.extent = dem.extent;
   state.demInfo = `${dem.sourceName}: ${dem.info}`;
   state.pendingDomainDem = dem;
@@ -389,11 +420,58 @@ async function prepareDomain(dem) {
   );
 }
 
-/** 模拟域提交 → 生成域掩膜 → 启动 SPH 模拟 */
-function onDomainCommitted(domain) {
-  const dem = state.pendingDomainDem;
-  if (!dem) return;
+/** 模拟域提交 → （全球模式先采样真实地形）→ 生成域掩膜 → 启动 SPH 模拟 */
+async function onDomainCommitted(domain) {
+  let dem = state.pendingDomainDem;
   state.pendingDomainDem = null;
+
+  if (!dem) {
+    // 全球地形模式：采样所画多边形 bbox 内的真实高程，构建 1024² DEM
+    const extent = domain.extent;
+    if (!extent || !extentIsValid(extent)) {
+      setStatus("❌ 模拟域范围无效，无法采样地形");
+      return;
+    }
+    setStatus("⏳ 正在采样模拟域内的真实地形高程，请稍候…");
+    try {
+      const sampled = await sampleTerrainDem(
+        viewer.terrainProvider,
+        extent,
+        options.globeSampleGrid,
+      );
+      const rect = Cesium.Rectangle.fromDegrees(...extent);
+      dem = {
+        kind: "globe",
+        sourceName: "全球地形采样",
+        canvas: sampled.canvas,
+        minElevation: sampled.minElevation,
+        maxElevation: sampled.maxElevation,
+        extent: [...extent],
+        contentAspect: (Math.cos(Cesium.Math.toRadians((extent[1] + extent[3]) / 2)) * (extent[2] - extent[0])) / (extent[3] - extent[1]),
+        info: `全球真实地形 · ${sampled.valid}/${sampled.samples} 网格点${sampled.flat ? " · 区域较平坦" : ""}`,
+      };
+      addRangeOutline(rect, dem);
+      // 飞到所画区域（留出边距，带俯角，便于观察地表汇流）
+      viewer.camera.flyTo({
+        destination: Cesium.Rectangle.fromDegrees(
+          extent[0] - (extent[2] - extent[0]) * 0.4,
+          extent[1] - (extent[3] - extent[1]) * 0.4,
+          extent[2] + (extent[2] - extent[0]) * 0.4,
+          extent[3] + (extent[3] - extent[1]) * 0.4,
+        ),
+        orientation: {
+          heading: 0,
+          pitch: Cesium.Math.toRadians(-55),
+          roll: 0,
+        },
+        duration: 1.5,
+      });
+    } catch (err) {
+      console.error(err);
+      setStatus(`❌ 地形采样失败：${err.message}`);
+      return;
+    }
+  }
 
   // 域掩膜：约束物理边界、渲染裁剪、全域降雨范围
   const domainMaskCanvas = rasterizeDomainMask(domain.simPoly);
@@ -577,12 +655,15 @@ function toggleWholeRain(on) {
 
 function wireToolbar() {
   dom.btnUpload = $("btnUpload");
+  dom.btnGlobe = $("btnGlobe");
   dom.btnDomain = $("btnDomain");
   dom.btnDraw = $("btnDraw");
   dom.btnWholeRain = $("btnWholeRain");
   dom.btnClearRegions = $("btnClearRegions");
   dom.fileInput = $("fileInput");
   dom.statusBar = $("statusBar");
+
+  dom.btnGlobe?.addEventListener("click", () => startGlobalDomainDraw());
 
   dom.btnUpload.addEventListener("click", () => dom.fileInput.click());
   dom.fileInput.addEventListener("change", () => {
@@ -592,10 +673,14 @@ function wireToolbar() {
   });
 
   dom.btnDomain.addEventListener("click", () => {
-    if (!state.pendingDomainDem || domainEditor?.drawing) return;
-    domainEditor.startDrawing(state.pendingDomainDem.extent);
-    dom.btnDomain.classList.add("active");
-    setStatus("🗺 请在高程图覆盖范围内划定模拟域：左键加点 / 右键或回车闭合");
+    if (domainEditor?.drawing) return;
+    if (state.sourceMode === "globe" || !state.pendingDomainDem) {
+      startGlobalDomainDraw();
+    } else {
+      domainEditor.startDrawing(state.pendingDomainDem.extent);
+      dom.btnDomain.classList.add("active");
+      setStatus("🗺 请在高程图覆盖范围内划定模拟域：左键加点 / 右键或回车闭合");
+    }
   });
 
   dom.btnDraw.addEventListener("click", () => {
@@ -623,8 +708,9 @@ function wireToolbar() {
 
 function refreshButtons() {
   const hasSim = !!state.extent && !!fluid;
-  const hasPendingDomain = !!state.pendingDomainDem;
-  if (dom.btnDomain) dom.btnDomain.disabled = !hasPendingDomain;
+  // 全球模式或已上传数据时都允许划域（全球模式下 btnDomain 始终可用）
+  const canDrawDomain = state.sourceMode === "globe" || !!state.pendingDomainDem;
+  if (dom.btnDomain) dom.btnDomain.disabled = !canDrawDomain;
   if (!dom.btnDraw) return;
   dom.btnDraw.disabled = !hasSim;
   dom.btnWholeRain.disabled = !hasSim;
@@ -643,12 +729,14 @@ function buildGui() {
   /* ---- 数据 ---- */
   const fData = gui.addFolder("高程数据");
   const dataActions = {
+    "全球地形模式": () => startGlobalDomainDraw(),
     上传高程图: () => dom.fileInput.click(),
     加载示例数据: async () => {
       setStatus("⏳ 正在加载示例…");
       await loadSample();
     },
   };
+  fData.add(dataActions, "全球地形模式");
   fData.add(dataActions, "上传高程图");
   fData.add(dataActions, "加载示例数据");
   fData
@@ -665,6 +753,14 @@ function buildGui() {
     .onChange(() => {
       if (state.pendingPlaceDem) {
         setStatus("调整了地形起伏跨度：重新点击底图设置中心点即可生效");
+      }
+    });
+  fData
+    .add(options, "globeSampleGrid", 32, 160, 8)
+    .name("地形采样精度")
+    .onChange(() => {
+      if (state.sourceMode === "globe") {
+        setStatus("调整了地形采样精度：重新划定模拟域即可生效");
       }
     });
   const demLabel = { 信息: "尚未加载" };
@@ -1242,6 +1338,49 @@ window.__app = {
       [1 - insetU, 1 - insetV],
       [insetU, 1 - insetV],
     ]);
+  },
+  /**
+   * 全球地形模式测试钩子：在给定经纬度 bbox 内提交一个 uv 多边形模拟域。
+   * 走真实地形采样（异步）→ 生成域掩膜 → 启动模拟的完整流程。
+   * @param {[number,number,number,number]} extentDeg [minLon,minLat,maxLon,maxLat]
+   * @param {Array<[number,number]>} uvList [u,v]，v=0 为北（着色器约定）
+   */
+  async commitGlobeDomain(
+    extentDeg,
+    uvList = [
+      [0.08, 0.08],
+      [0.92, 0.08],
+      [0.92, 0.92],
+      [0.08, 0.92],
+    ],
+  ) {
+    if (!domainEditor || !Array.isArray(extentDeg) || extentDeg.length !== 4)
+      return { ok: false, reason: "bad-extent" };
+    if (startGlobalDomainDraw) startGlobalDomainDraw(); // 确保重置为全球模式
+    domainEditor.startDrawing(null);
+    domainEditor._commit(
+      uvList.map(([u, v]) =>
+        Cesium.Cartographic.fromDegrees(
+          extentDeg[0] + u * (extentDeg[2] - extentDeg[0]),
+          extentDeg[1] + (1 - v) * (extentDeg[3] - extentDeg[1]),
+        ),
+      ),
+    );
+    domainEditor.stopDrawing();
+    // onDomainCommitted 是异步的（地形采样），等待流体创建完成
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      if (fluid && !state.pendingDomainDem) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return {
+      ok: this.hasDomain() && !!fluid,
+      vertices: state.domain?.simPoly.length ?? 0,
+      hasMask: !!fluid?._domainMaskLive,
+      domainEnabled: fluid?._domainEnabled ?? false,
+      extent: state.extent ? [...state.extent] : null,
+      sourceMode: state.sourceMode,
+    };
   },
   /** 提交任意 uv 多边形作为模拟域：走 DomainEditor，触发生成掩膜 + 启动模拟 */
   commitDomainUV(uvList) {

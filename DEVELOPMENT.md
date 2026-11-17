@@ -19,6 +19,7 @@
    - 5.4 [降雨区域与掩膜管线](#54-降雨区域与掩膜管线)
    - 5.5 [SPH 着色器改动](#55-sph-着色器改动)
    - 5.6 [基础地形与底图](#56-基础地形与底图)
+   - 5.7 [全球地形直接划域（地形采样）](#57-全球地形直接划域地形采样)
 6. [关键修复记录](#6-关键修复记录)
 7. [测试体系](#7-测试体系)
 8. [参数调优指南](#8-参数调优指南)
@@ -33,13 +34,15 @@
 
 | # | 需求 | 实现 | 关键模块 |
 |---|------|------|----------|
-| 0 | 上传高程图后先手动划定**任意多边形模拟域**，水体被严格限制在域内 | 上传只做"准备"（解析范围 + DEM 叠置），玩家在高程图范围内点选顶点闭合多边形 → 栅格化为 1024² 域掩膜 → 同时约束物理与渲染 | `src/sim/domainMask.js` + `src/ui/domainEditor.js` |
-| 1 | 上传高程图（tif/png 等），系统自动分析覆盖范围并划定模拟区域 | GeoTIFF 解析地理参考得 bbox；普通图片自动裁边 + 底图点击放置（自动采样地形高程贴地）；覆盖范围作为模拟域的可选边界 | `src/io/elevationLoader.js` |
-| 2 | 在模拟域内划定一个或多个降雨区域 | 地球表面交互绘制多边形（任意数量），**提交时校验所有顶点落在模拟域内**，实体贴地渲染，每区域独立参数面板 | `src/ui/rainRegionEditor.js` |
-| 3 | 降雨区域累加雨量并实时流体模拟 | 雨区栅格化为 GPU 掩膜纹理，SPH 模拟步内持续注入质量 → 贴地积蓄 → 沿地形汇流，域外质量衰减/速度反射/渲染裁剪 | `src/sim/rainMask.js` + `src/sim/shaders.js` |
+| 0 | **默认：无需上传数据，直接在当前全球地形上画任意多边形区域即可模拟** | 打开页面即全球卫星地形 → 左键在地表画多边形 → 系统自动采样该区域真实高程生成 DEM → 域掩膜限水 → 启动模拟 | `src/io/terrainSampler.js` + `src/ui/domainEditor.js`（自由模式） |
+| 1 | 上传高程图（tif/png 等），系统自动分析覆盖范围并划定模拟区域（**可选入口**） | GeoTIFF 解析地理参考得 bbox；普通图片自动裁边 + 底图点击放置（自动采样地形高程贴地）；覆盖范围作为模拟域的可选边界 | `src/io/elevationLoader.js` |
+| 2 | 先划定**任意多边形模拟域**，水体被严格限制在域内 | 上传只做"准备"（解析范围 + DEM 叠置），玩家在高程图范围内点选顶点闭合多边形 → 栅格化为 1024² 域掩膜 → 同时约束物理与渲染 | `src/sim/domainMask.js` + `src/ui/domainEditor.js` |
+| 3 | 在模拟域内划定一个或多个降雨区域 | 地球表面交互绘制多边形（任意数量），**提交时校验所有顶点落在模拟域内**，实体贴地渲染，每区域独立参数面板 | `src/ui/rainRegionEditor.js` |
+| 4 | 降雨区域累加雨量并实时流体模拟 | 雨区栅格化为 GPU 掩膜纹理，SPH 模拟步内持续注入质量 → 贴地积蓄 → 沿地形汇流，域外质量衰减/速度反射/渲染裁剪 | `src/sim/rainMask.js` + `src/sim/shaders.js` |
 
 顺带完成的基础增强：
 
+- **默认全球地形模式**：不需要任何 DEM 文件，打开即可在真实卫星地形上划域模拟；地形采样用固定级别 `sampleTerrain`（比 `sampleTerrainMostDetailed` 快约 70×，见 §5.7）。
 - **去 Token 化运行**：无 Cesium Ion Token 时自动使用 ArcGIS 全球地形（WorldElevation3D）+ ArcGIS 卫星影像，均免密钥；配置 Token 则优先 Ion 底图 + Cesium World Terrain；离线自动降级（仅影响显示，不影响模拟）。
 - **DEM 叠置可视化**：高程图以影像层贴在真实地形上显示，配合黄色范围框与标注，"覆盖范围"一目了然。
 - **模拟环境可重建**：切换数据时完整销毁旧的渲染管线/实体/影像层，可反复上传不同数据。
@@ -66,6 +69,10 @@
 
 ![多边形模拟域裁剪](docs/images/05_irregular_domain_clipping.png)
 
+**默认全球地形模式：直接在真实卫星地形上画五边形区域，自动采样高程并模拟**：
+
+![全球地形直接划域](docs/images/06_globe_domain.png)
+
 ## 3. 快速开始
 
 ### 运行应用
@@ -77,15 +84,16 @@ npx http-server -p 8080
 # 浏览器打开 http://127.0.0.1:8080（需 WebGL2，Chrome/Edge 现代版本）
 ```
 
-打开页面会自动加载内置示例（加州 Tuolumne DEM）。完整操作流程变为**三段式**：
+打开页面**默认就是全球地形模式**（打开即见真实卫星影像 + 3D 地形），完整操作流程：
 
-1. **上传高程图**（或等示例加载）→ 系统解析覆盖范围、把 DEM 叠置到真实地形上，但**暂不启动模拟**，状态栏提示"🗺 请划定模拟域"。
-2. **点击「🗺 划定模拟域」**（或上传后自动进入）：在黄色范围框内左键逐点添加顶点，右键 / 双击 / 回车闭合（≥3 点）。提交后生成域掩膜并启动模拟。
+1. **直接在地形上画模拟域**：左键在任意地表逐点添加顶点，右键 / 双击 / 回车闭合（≥3 点）。提交后系统自动采样该多边形范围内的真实高程（见 §5.7），生成域掩膜并启动模拟。无需上传任何数据。
+2. **（可选）改用自有高程图**：点「📂 上传高程图」→ GeoTIFF 自动解析覆盖范围 / 普通图片按提示点击放置 → DEM 叠置到地形上，同样进入"请划定模拟域"阶段。
 3. **在域内绘制雨区 / 开启降雨**：点击「🌧 绘制降雨区域」在模拟域内画多边形（顶点必须全部落在域内），GUI 勾选「开始降雨」；或直接用「全域降雨」给整个模拟域注水。
+4. 随时点「🌐 全球地形」回到默认模式重新划域。
 
 水体被严格限制在橙色模拟域边界内，域外无水。
 
-### 运行测试（无头浏览器冒烟测试，24 项断言）
+### 运行测试（无头浏览器冒烟测试，23 项断言）
 
 ```bash
 cd test
@@ -97,7 +105,7 @@ npm i                # 安装 puppeteer-core
 npm test             # node smoke.mjs
 ```
 
-测试内容：页面加载 / 示例自动加载后**停在划域阶段（未启动）** / **提交模拟域后启动（域掩膜生成 + 域约束开启）** / GeoTIFF 自动定位后重新划域 / UTM 投影换算后重新划域 / **域外雨区被拒绝、域内雨区成功** / 雨区→掩膜→注入累加→停止 / 全域降雨 / PNG 手动放置后划域 / 无致命错误。输出 `report.json` 与截图。另有 `verify_irregular_domain.mjs` 提交凸五边形域并截图，验证非矩形裁剪。
+测试内容：默认全球模式（无 DEM/无流体） / **全球划域→采样真实地形→启动（域掩膜+域约束）** / 域外雨区被拒绝、域内雨区成功 / 雨区→掩膜→注入累加→停止 / 全域降雨 / GeoTIFF 自动定位后划域 / UTM 投影换算后划域 / PNG 手动放置后划域 / 无致命错误。输出 `report.json` 与截图。另有 `verify_irregular_domain.mjs`（上传模式凸五边形域）、`verify_globe.mjs`（全球模式 12 项）、`verify_globe_top.mjs`（正俯视视觉）等专项脚本。
 
 ## 4. 系统架构
 
@@ -109,14 +117,19 @@ index.html ──┬── Cesium 1.132（内置）
              └── index.js (module)       主控
                     │
    ┌────────────────┼────────────────────────────────┐
-   │ 数据流          │                                │
-   │  File ──▶ elevationLoader ──▶ ElevationData      │
-   │  {canvas 1024²灰度, min/max, extent|null, info}  │
-   │      │ extent 有效 ──▶ prepareDomain()（叠置+划域提示，未启动）
-   │      │ extent 为空 ──▶ pendingPlaceDem ──▶ 点击   │
-   │      │                底图 ──▶ 采样地形高程 ──▶    │
+   │ 数据流（两条入口，最终都产出 dem + 多边形域）   │
+   │ 【默认·全球模式】用户在真实地形上画多边形       │
+   │   DomainEditor(freeMode).onChange → domain.extent(多边形bbox)
+   │      → sampleTerrainDem(provider, bbox) → dem{canvas, min/max, extent}
+   │      → onDomainCommitted → flyTo + addRangeOutline
+   │ 【可选·上传模式】                              │
+   │  File → elevationLoader → ElevationData         │
+   │  {canvas 1024²灰度, min/max, extent|null, info} │
+   │      │ extent 有效 → prepareDomain()（叠置+划域提示，未启动）
+   │      │ extent 为空 → pendingPlaceDem → 点击底图  │
+   │      │                → 采样地形高程            │
    │      ▼                                          │
-   │  用户绘制任意多边形模拟域 ─▶ DomainEditor.onChange │
+   │  用户绘制任意多边形模拟域 → DomainEditor.onChange │
    │      ──▶ rasterizeDomainMask → onDomainCommitted  │
    │      ──▶ regionEditor.setDomain(域多边形)          │
    │      ──▶ startSimulation:                        │
@@ -136,8 +149,11 @@ index.html ──┬── Cesium 1.132（内置）
    │      ──▶ rasterizeRainMask(区域列表) ──▶ fluid    │
 ```
 
-- **三段式主控流程**：`handleUploadFile` → `prepareDomain(dem)`（解析 + 叠置 + `domainEditor.startDrawing`，**不启动模拟**）→ 用户闭合并提交多边形 → `onDomainCommitted(domain)` → `finishStart(dem, domainMaskCanvas)`。保证"先划模拟域、再在域内划雨区"。
-- 体积盒仍用高程图覆盖范围 `dem.extent` 生成（保证 heightMap uv 与着色器 uv 对齐、地形不错位）；模拟域只是盒内的一个多边形，通过 1024² 域掩膜表达。
+- **双入口主控流程**：
+  - 全球模式（默认）：打开 → `startGlobalDomainDraw()` → 用户在地形上画多边形 → `DomainEditor(freeMode)._commit` 由多边形 bbox 反推 `domain.extent` → `onDomainCommitted(domain)`（async）→ 采样真实地形生成 dem → `addRangeOutline` + `flyTo` → `finishStart(dem, domainMaskCanvas)`。
+  - 上传模式（可选）：`handleUploadFile` → `prepareDomain(dem)`（解析 + 叠置 + `domainEditor.startDrawing(dem.extent)`，**不启动模拟**）→ 用户闭合并提交多边形 → `onDomainCommitted(domain)`（复用 pendingDomainDem）→ `finishStart(...)`。
+  - 二者都保证"先划模拟域、再在域内划雨区"。
+- 体积盒用 dem 覆盖范围生成（全球模式=多边形 bbox，上传模式=高程图覆盖范围；保证 heightMap uv 与着色器 uv 对齐、地形不错位）；模拟域只是盒内的一个多边形，通过 1024² 域掩膜表达。
 - 上游管线每帧执行 **两次物理子步**：`BufferB(simulationTexture)` 与 `simulationHistoryStage`（同一着色器再跑一遍写 historyTexture），注入发生在两处（同一掩膜、同一强度），累加语义一致。
 - 每次切换数据调用 `teardownSimulation(true)`：销毁 5 个阶段、4 张模拟纹理、DEM/掩膜纹理、边界实体、叠置层，并清空雨区。
 
@@ -240,9 +256,24 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
 
 贴地渲染：雨区实体/范围框/标注全部 `CLAMP_TO_GROUND` 或 GroundPrimitive；模拟范围框 `heightReference: RELATIVE_TO_GROUND, height: 150`。
 
+### 5.7 全球地形直接划域（地形采样）
+
+默认模式。用户不上传任何数据，直接在全球卫星地形上画多边形，`src/io/terrainSampler.js` 负责把该区域真实高程转成 SPH 需要的 1024² 灰度高度图：
+
+1. **范围来源**：多边形提交时（freeMode）由顶点经纬度 bbox 反推 `domain.extent`（十进制度），同时作为体积盒范围（与上传模式的 dem.extent 等价）。
+2. **采样策略（性能关键）**：在 bbox 内铺 `globeSampleGrid × globeSampleGrid`（默认 96，GUI 可调 32~160）个 `Cartographic` 网格点（v=0 为北，与全链路 north-up 约定一致）。
+   - 优先用 `Cesium.sampleTerrain(provider, level, positions)` 固定级别采样，级别由区域跨度自适应：`ideal = log2(360 / spanDeg) + 1.3`，clamp 到 8~15。
+   - 失败才退化到 `sampleTerrainMostDetailed`。
+   - **实测性能差约 70×**：固定级别 12 采样 32×32 点耗时 ~147ms，而 `sampleTerrainMostDetailed` 同样点数需 ~10231ms。这正是不能图省事直接用 mostDetailed 的原因（会卡界面 10 秒以上）。
+3. **高程归一化**：`Float64Array` 存采样高程，NaN 用最近有效值填充；统计 min/max 后上下各留 5% 余量（跨度 <1m 时给 ±5m）；`encodeHeightGrid()` 双线性插值放大到 1024² 灰度画布，`g = (h - min) × 255 / (max - min)`（行 0 = 北），喂给着色器 heightMap。
+4. **模拟框相机**：采样完成后 `flyTo` 到 bbox（留 0.4× 边距、pitch -55°、1.5s），便于观察贴地汇流。
+5. **降级**：无可用地形 provider 或采样全部失败时构造平坦 DEM（`flat=true`），模拟仍可运行，只是高度场为常数。
+
+验证：`test/verify_globe.mjs`（12 项）覆盖默认模式、五边形采样启动、重复划域、注入等，ALL PASS；`sampleTerrain` 优化后全球划域启动耗时从 ~36.7s 降到 ~2.3s。视觉截图 `docs/images/06_globe_domain.png` 显示水体随真实山地起伏汇聚、域外无水。
+
 ## 6. 关键修复记录
 
-三个踩坑极深的 bug，记录根因与验证方法，避免后续重蹈（§6.4/§6.5 为模拟域改造新增）：
+四个踩坑极深的 bug + 一个状态栏覆盖问题，记录根因与验证方法，避免后续重蹈（§6.4/§6.5 为模拟域改造新增）：
 
 ### 6.1 雨区与水体 N-S 镜像（掩膜画布 y 取反）
 
@@ -285,16 +316,19 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
 | 文件 | 作用 |
 |------|------|
 | `server.mjs` | 静态服务器 :8931（服务仓库根目录） |
-| `smoke.mjs` | 24 项断言冒烟测试（含模拟域流程 + UTM 投影夹具），输出截图 + `report.json` |
+| `smoke.mjs` | 23 项断言冒烟测试（默认全球模式 + 上传模式 + UTM 投影夹具），输出截图 + `report.json` |
 | `make_tiff.mjs` | 生成两份合成 GeoTIFF 夹具：EPSG:4326 与 EPSG:32650(UTM50N)，128²、北亮南暗渐变，两者覆盖同一经纬度范围以便交叉验证 |
 | `probe_projection.mjs` | 投影解析纯 Node 单测（7 项）：EPSG:4326 直通、无标签拒判、EPSG:32650 换算、CGCS2000 GK 现场构造定义、退化 bbox 拒绝 |
 | `fixture_dem.tif` | 夹具 A 产物（已提交，bbox=[116.2,39.82,116.44,40.06]） |
 | `fixture_utm.tif` | 夹具 B 产物（EPSG:32650，与 A 同覆盖范围，用于验证跨坐标系一致性） |
 | `verify_fix.mjs` / `verify_align2.mjs` | 视觉验证脚本（非对称雨区 + 多机位截图） |
 | `verify_irregular_domain.mjs` | 提交**凸五边形**模拟域 + 全域降雨，截图 `shot_irregular_domain.png` 验证非矩形域精确裁剪水体 |
+| `verify_globe.mjs` | 全球模式 12 项：默认模式/按钮状态/五边形采样启动/重复划域/注入/无错误 |
+| `verify_globe_top.mjs` / `verify_globe_visual.mjs` | 全球模式正俯视/斜视视觉截图，确认水贴真实山地汇聚、域外无水 |
+| `probe_terrain_speed.mjs` | 采样速度探测：固定级别 `sampleTerrain` vs `sampleTerrainMostDetailed`（~70× 差距） |
 | `diag_terrain.mjs` | 检查 terrainProvider/影像层数 |
 
-**断言清单**：页面 ready → Viewer 创建 → 示例自动加载后**停在"请划定模拟域"阶段（未启动）** → **提交模拟域 → 域掩膜生成 + 域约束开启 + 流体启动（"🌊 模拟进行中"）** → 无着色器错误 → GeoTIFF 自动解析 bbox 后重新划域 → **UTM 投影 GeoTIFF 自动换算范围与同区域地理坐标夹具一致**后重新划域 → **域外雨区被拒绝、域内雨区成功 + 掩膜生成** → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确后重新划域 → 无致命控制台错误。
+**断言清单**：页面 ready → Viewer 创建 → **默认全球模式（无 DEM/无流体、btnGlobe 存在、划域按钮可用）** → **全球模式画多边形→采样真实地形→生成域掩膜+域约束+流体启动（"🌊 模拟进行中"、sourceMode=globe、bbox=多边形范围）** → 无着色器错误 → **域外雨区被拒绝、域内雨区成功 + 掩膜生成** → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → GeoTIFF 自动解析 bbox 后划域 → **UTM 投影换算为同区域经纬度**后划域 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确后划域 → 无致命控制台错误。
 
 **Node 侧单测**（无需浏览器，秒级）：
 
@@ -322,9 +356,12 @@ chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<dir> `
 | `heightScale` | shaders.js | **必须=0.25** | 约束：`DEM编码倍率(4.0) × heightScale = 1`，否则水体沉入/浮出地形 |
 | `waterAddRate` | GUI | 0.001~0.1 | 仅点源注水（需勾选 pointSource） |
 | `depth` | GUI | 50~500 | 体积渲染光线步进次数（质量/性能权衡） |
+| `globeSampleGrid` | options / GUI「地形采样精度」 | 32~160（默认96） | 全球模式采样网格边长。越大地形越精细但采样/插值越慢；山区建议 ≥64 |
+| `reliefMeters` | GUI | 50~3000（默认600） | 上传无参考图片时体积盒竖直厚度 |
 
 ## 9. 已知限制与 TODO
 
+- **全球地形直接划域（默认模式）**：✅ 已实现，无需上传数据，采样真实高程（§5.7）。固定级别采样优化后启动约 2.3s。
 - **投影坐标系 GeoTIFF（UTM / CGCS2000 高斯克吕格 / Lambert 等）**：✅ 已实现自动换算。`src/io/projection.js` 通过 GeoKey 解析 → proj4 转换，覆盖 WGS84 UTM（proj4 内置 326xx/327xx）与需要现场构造定义的中国 CGCS2000 系列（EPSG:4490 等），无地理参考或换算失败时降级手动放置并说明原因。
 - **模拟域（任意多边形）**：✅ 已实现"先划域、再划雨区、域内限水"三段式流程（§5.3）。域外质量衰减 + 速度反射 + 渲染裁剪。
 - **降雨无物理蒸发/下渗**：纯质量守恒，长期降雨会持续堆积至盒顶。
@@ -348,7 +385,8 @@ fluid-sph-rain/
 │   │   └── geoUtils.js         四空间坐标换算（§5.1 约定的唯一实现处）
 │   ├── io/
 │   │   ├── elevationLoader.js  GeoTIFF/图片解析 + 边界检测 + NoData
-│   │   └── projection.js       地理参考解析：GeoKey → proj4 → 经纬度 extent
+│   │   ├── projection.js       地理参考解析：GeoKey → proj4 → 经纬度 extent
+│   │   └── terrainSampler.js   全球模式：采样真实地形高程 → 1024² 灰度 DEM
 │   ├── ui/
 │   │   ├── domainEditor.js     模拟域（任意多边形）交互绘制/管理
 │   │   └── rainRegionEditor.js 降雨区域交互绘制/管理（含域内顶点校验）

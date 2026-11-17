@@ -28,14 +28,21 @@ export class DomainEditor {
 
   /* ------------------------------ 绘制控制 ------------------------------ */
 
+  /**
+   * 进入绘制模式。
+   * @param {Array|null} extent 顶点必须落在该经纬度范围内；传 null 表示「全球自由绘制」
+   *                           （用户在全球地形上任意画，提交时由多边形 bbox 反推范围）
+   */
   startDrawing(extent) {
-    if (!Array.isArray(extent) || extent.length !== 4) return;
-    this._extent = extent;
+    this._freeMode = !Array.isArray(extent) || extent.length !== 4;
+    this._extent = this._freeMode ? null : extent;
     this.drawing = true;
     this.clearDomain(false); // 清除旧域实体，但保留数据直到新域提交
     this._ensureHandler();
     this._status(
-      "🗺 划定模拟域：左键添加顶点（须落在高程图覆盖范围内），右键 / 双击 / 回车闭合，Esc 取消",
+      this._freeMode
+        ? "🗺 划定模拟域（全球地形）：左键在任意地表添加顶点，右键 / 双击 / 回车闭合，Esc 取消"
+        : "🗺 划定模拟域：左键添加顶点（须落在高程图覆盖范围内），右键 / 双击 / 回车闭合，Esc 取消",
     );
   }
 
@@ -68,7 +75,11 @@ export class DomainEditor {
         return;
       }
       if (!this._withinExtent(carto)) {
-        this._status("⚠ 该点在高程图覆盖范围之外，请在范围内点击");
+        this._status(
+          this._freeMode
+            ? "⚠ 未拾取到地表位置，请在地形上点击"
+            : "⚠ 该点在高程图覆盖范围之外，请在范围内点击",
+        );
         return;
       }
       this._pendingCartos.push(carto);
@@ -164,13 +175,27 @@ export class DomainEditor {
 
   /* ------------------------------ 提交与维护 ---------------------------- */
 
-  /** 提交模拟域（cartos 经纬度数组） */
+  /** 提交模拟域（cartos 经纬度数组，弧度） */
   _commit(cartos) {
-    const extent = this._extent;
-    if (!extent || cartos.some((c) => !this._withinExtent(c))) {
+    if (!cartos || cartos.length < 3) {
+      this._status("⚠ 模拟域至少需要 3 个顶点");
+      return false;
+    }
+    // 全球自由绘制模式：顶点可为任意地表位置，提交时由多边形 bbox 反推覆盖范围
+    if (this._freeMode) {
+      const lons = cartos.map((c) => Cesium.Math.toDegrees(c.longitude));
+      const lats = cartos.map((c) => Cesium.Math.toDegrees(c.latitude));
+      this._extent = [
+        Math.min(...lons),
+        Math.min(...lats),
+        Math.max(...lons),
+        Math.max(...lats),
+      ];
+    } else if (cartos.some((c) => !this._withinExtent(c))) {
       this._status("⚠ 模拟域顶点必须在高程图覆盖范围内");
       return false;
     }
+    const extent = this._extent;
 
     const [minLon, minLat, maxLon, maxLat] = extent;
     const simPoly = cartos.map((c) => {
@@ -182,7 +207,12 @@ export class DomainEditor {
       };
     });
 
-    this.domain = { simPoly, cartos: [...cartos], label: "模拟域" };
+    this.domain = {
+      simPoly,
+      cartos: [...cartos],
+      label: "模拟域",
+      extent: [...extent], // 供主控采样真实地形（全球模式由 bbox 反推）
+    };
     this._renderDomain(cartos);
     // 先播报提交成功，再通知主控（主控会设置更完整的"模拟进行中"状态覆盖它）
     this._status(`✅ 模拟域已划定（顶点 ${simPoly.length}）`);
@@ -191,6 +221,7 @@ export class DomainEditor {
   }
 
   _withinExtent(carto) {
+    if (this._freeMode) return true; // 全球模式：任意地表位置都可
     const e = this._extent;
     if (!e) return false;
     const lon = Cesium.Math.toDegrees(carto.longitude);
