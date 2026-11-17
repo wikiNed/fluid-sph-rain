@@ -12,7 +12,9 @@ import {
 } from "./src/sim/shaders.js";
 import { loadElevationFile } from "./src/io/elevationLoader.js";
 import { RainRegionEditor } from "./src/ui/rainRegionEditor.js";
+import { DomainEditor } from "./src/ui/domainEditor.js";
 import { rasterizeRainMask } from "./src/sim/rainMask.js";
+import { rasterizeDomainMask } from "./src/sim/domainMask.js";
 import {
   rectangleAroundCenter,
   extentIsValid,
@@ -80,6 +82,8 @@ let viewer;
 let fluid = null;
 /** @type {RainRegionEditor} */
 let regionEditor = null;
+/** @type {DomainEditor} */
+let domainEditor = null;
 
 const state = {
   /** @type {[number,number,number,number]|null} 当前模拟范围 [minLon,minLat,maxLon,maxLat] */
@@ -87,6 +91,10 @@ const state = {
   demInfo: "尚未加载数据",
   /** 等待手动放置中心点的数据包 */
   pendingPlaceDem: null,
+  /** 已解析但等待划定模拟域的数据包 */
+  pendingDomainDem: null,
+  /** 已提交的模拟域 {simPoly, cartos, label} */
+  domain: null,
   drapeLayer: null,
   /** 模拟范围矩形/标签等 UI 实体，随模拟重建一起清理 */
   uiEntities: [],
@@ -183,7 +191,7 @@ async function initViewer() {
   viewer.postProcessStages.fxaa.enabled = true;
   viewer.scene.globe.depthTestAgainstTerrain = true;
 
-  // 降雨区域编辑器
+  // 降雨区域编辑器（划定模拟域之后才允许绘制雨区）
   regionEditor = new RainRegionEditor(viewer, {
     onChange: () => {
       applyRainRegions();
@@ -197,9 +205,23 @@ async function initViewer() {
     },
   });
 
+  // 模拟域编辑器（上传高程图后、启动模拟前划定）
+  domainEditor = new DomainEditor(viewer, {
+    onChange: (domain) => {
+      if (!domain) return;
+      state.domain = domain;
+      // 提交模拟域 → 生成掩膜 → 启动模拟
+      onDomainCommitted(domain);
+    },
+    onStatus: (t) => setStatus(`<strong>划定模拟域</strong><br>${t}`),
+    onDrawingEnd: () => {
+      dom.btnDomain?.classList.remove("active");
+    },
+  });
+
   // 左键：点源注水（原版交互；绘制模式下让位给编辑器）
   viewer.screenSpaceEventHandler.setInputAction((movement) => {
-    if (regionEditor.drawing || state.pendingPlaceDem) return;
+    if (regionEditor.drawing || domainEditor?.drawing || state.pendingPlaceDem || state.pendingDomainDem) return;
     if (!state.extent) return;
     const carto = pickCartographic(movement.position);
     if (!carto) return;
@@ -284,7 +306,7 @@ async function placePendingDemAtDegrees(lon, lat) {
     }
   }
 
-  await finishStart(dem);
+  await prepareDomain(dem);
 }
 
 function cartoToDegrees(carto) {
@@ -317,25 +339,68 @@ async function handleUploadFile(file) {
   setStatus(`⏳ 正在解析 ${file.name} …`);
   try {
     const dem = await loadElevationFile(file);
-    // 每次换数据都重建模拟环境
-    teardownSimulation(true);
     if (dem.extent && extentIsValid(dem.extent)) {
-      setStatus(
-        `🗺 <strong>${dem.sourceName}</strong><br>${dem.info}<br>覆盖范围已解析：` +
-          `${dem.extent.map((x) => x.toFixed(4)).join(", ")}<br>正在构建模拟区域…`,
-      );
-      await finishStart(dem);
+      await prepareDomain(dem);
     } else {
+      // 无地理参考：先进入手动放置流程，放置完成后再进入划域阶段
       state.pendingPlaceDem = dem;
       setStatus(
         `📋 <strong>${dem.sourceName}</strong><br>${dem.info}<br>` +
-          `<strong>请在底图上单击一点作为模拟区域中心</strong>（可用 GUI 调整放置宽度 km）`,
+          `<strong>请在底图上单击一点作为高程图中心</strong>（可用 GUI 调整放置宽度 km）；` +
+          `放置后划定模拟域。`,
       );
     }
   } catch (err) {
     console.error(err);
     setStatus(`❌ 解析失败：${err.message}`);
   }
+}
+
+/**
+ * 高程数据就绪后：显示 DEM 叠置，等待用户划定模拟域，再启动模拟。
+ * 模拟域为高程图覆盖范围内的任意多边形。
+ */
+async function prepareDomain(dem) {
+  if (!extentIsValid(dem.extent)) {
+    setStatus("❌ 覆盖范围无效，无法划定模拟域");
+    return;
+  }
+  // 换数据时重建模拟环境（清空旧流体/雨区/域）
+  teardownSimulation(true);
+  state.extent = dem.extent;
+  state.demInfo = `${dem.sourceName}: ${dem.info}`;
+  state.pendingDomainDem = dem;
+
+  const rect = Cesium.Rectangle.fromDegrees(...dem.extent);
+  viewer.camera.flyTo({ destination: rect, duration: 1.2 });
+
+  addDrapeLayer(dem, rect);
+  addRangeOutline(rect, dem);
+
+  // 自动进入模拟域绘制模式
+  domainEditor.startDrawing(dem.extent);
+  dom.btnDomain?.classList.add("active");
+  refreshButtons();
+
+  setStatus(
+    `🗺 <strong>请划定模拟域</strong><br>数据：${dem.sourceName} · ${dem.info}<br>` +
+      `覆盖范围：${extentAreaLabel(dem.extent)}<br>` +
+      `左键在高程图覆盖范围内添加顶点，右键 / 双击 / 回车闭合（至少 3 点）；Esc 取消。`,
+  );
+}
+
+/** 模拟域提交 → 生成域掩膜 → 启动 SPH 模拟 */
+function onDomainCommitted(domain) {
+  const dem = state.pendingDomainDem;
+  if (!dem) return;
+  state.pendingDomainDem = null;
+
+  // 域掩膜：约束物理边界、渲染裁剪、全域降雨范围
+  const domainMaskCanvas = rasterizeDomainMask(domain.simPoly);
+  // 雨区编辑器同步域多边形：之后绘制的雨区必须在域内
+  regionEditor.setDomain(domain.simPoly);
+
+  finishStart(dem, domainMaskCanvas);
 }
 
 async function loadSample() {
@@ -355,8 +420,7 @@ async function loadSample() {
     contentAspect: 1,
     info: "内置示例 · 高程已归一化",
   };
-  teardownSimulation(true);
-  await finishStart(dem);
+  await prepareDomain(dem);
 }
 
 /* ==================================================================== */
@@ -370,6 +434,11 @@ function teardownSimulation(alsoClearEntities) {
   }
   regionEditor?.stopDrawing();
   if (alsoClearEntities) regionEditor?.clearAll();
+  regionEditor?.setDomain(null);
+  domainEditor?.stopDrawing();
+  if (alsoClearEntities) domainEditor?.clearDomain(false);
+  state.domain = null;
+  state.pendingDomainDem = null;
   if (state.drapeLayer) {
     viewer.imageryLayers.remove(state.drapeLayer, true);
     state.drapeLayer = null;
@@ -383,7 +452,7 @@ function teardownSimulation(alsoClearEntities) {
   refreshButtons();
 }
 
-async function finishStart(dem) {
+async function finishStart(dem, domainMaskCanvas) {
   if (!extentIsValid(dem.extent)) {
     setStatus("❌ 覆盖范围无效，无法开始模拟");
     return;
@@ -392,22 +461,20 @@ async function finishStart(dem) {
   state.demInfo = `${dem.sourceName}: ${dem.info}`;
 
   const rect = Cesium.Rectangle.fromDegrees(...dem.extent);
-  viewer.camera.flyTo({ destination: rect, duration: 1.2 });
-
-  addDrapeLayer(dem, rect);
-  addRangeOutline(rect, dem);
 
   fluid = new TerrainFluidSimulation(viewer, dem, options);
+  fluid.setDomainMask(domainMaskCanvas, !!state.domain);
 
   rebuildRegionGui();
   applyRainRegions(); // 应用已有雨区（清空后为无雨）
   refreshButtons();
 
   const nRain = regionEditor.getActiveRegions().length;
+  const domainLabel = state.domain ? `模拟域顶点 ${state.domain.simPoly.length} 个` : "无模拟域";
   setStatus(
     `🌊 <strong>模拟进行中</strong><br>数据：${dem.sourceName} · ${dem.info}<br>` +
-      `范围：${extentAreaLabel(dem.extent)} · 雨区数量：<strong>${nRain}</strong><br>` +
-      `提示：「🌧 绘制降雨区域」左键加点 / 右键结束；GUI 中可开启全域降雨或调整强度。`,
+      `范围：${extentAreaLabel(dem.extent)} · ${domainLabel} · 雨区数量：<strong>${nRain}</strong><br>` +
+      `提示：「🌧 绘制降雨区域」左键加点 / 右键结束（雨区须在橙色模拟域内）；GUI 中可开启全域降雨或调整强度。`,
   );
 }
 
@@ -510,6 +577,7 @@ function toggleWholeRain(on) {
 
 function wireToolbar() {
   dom.btnUpload = $("btnUpload");
+  dom.btnDomain = $("btnDomain");
   dom.btnDraw = $("btnDraw");
   dom.btnWholeRain = $("btnWholeRain");
   dom.btnClearRegions = $("btnClearRegions");
@@ -521,6 +589,13 @@ function wireToolbar() {
     const f = dom.fileInput.files?.[0];
     dom.fileInput.value = "";
     handleUploadFile(f);
+  });
+
+  dom.btnDomain.addEventListener("click", () => {
+    if (!state.pendingDomainDem || domainEditor?.drawing) return;
+    domainEditor.startDrawing(state.pendingDomainDem.extent);
+    dom.btnDomain.classList.add("active");
+    setStatus("🗺 请在高程图覆盖范围内划定模拟域：左键加点 / 右键或回车闭合");
   });
 
   dom.btnDraw.addEventListener("click", () => {
@@ -548,6 +623,8 @@ function wireToolbar() {
 
 function refreshButtons() {
   const hasSim = !!state.extent && !!fluid;
+  const hasPendingDomain = !!state.pendingDomainDem;
+  if (dom.btnDomain) dom.btnDomain.disabled = !hasPendingDomain;
   if (!dom.btnDraw) return;
   dom.btnDraw.disabled = !hasSim;
   dom.btnWholeRain.disabled = !hasSim;
@@ -717,6 +794,11 @@ class TerrainFluidSimulation {
     this._rainMaskLive = null;
     this._rainEmptyTexture = this._createBlackTexture();
 
+    // —— 模拟域掩膜（白=域内，黑=域外；未启用时用全白纹理表示全域）——
+    this._domainMaskLive = null;
+    this._domainEnabled = false;
+    this._domainWhiteTexture = this._createWhiteTexture();
+
     // 统计
     this._frame = 0;
     this._injectedSum = 0;
@@ -761,6 +843,48 @@ class TerrainFluidSimulation {
         wrapT: Cesium.TextureWrap.CLAMP_TO_EDGE,
       }),
       source: canvasOrNull,
+    });
+  }
+
+  /**
+   * 设置模拟域掩膜。
+   * @param {HTMLCanvasElement|null} canvasOrNull 域内白/域外黑；null 表示无域
+   * @param {boolean} enabled 是否启用域约束（有域时应为 true）
+   */
+  setDomainMask(canvasOrNull, enabled) {
+    if (this._domainMaskLive) {
+      this._domainMaskLive.destroy();
+      this._domainMaskLive = null;
+    }
+    this._domainEnabled = !!enabled && !!canvasOrNull;
+    if (!canvasOrNull) return;
+    this._domainMaskLive = new Cesium.Texture({
+      context: this._viewer.scene.context,
+      width: canvasOrNull.width,
+      height: canvasOrNull.height,
+      pixelFormat: Cesium.PixelFormat.RGBA,
+      pixelDatatype: Cesium.PixelDatatype.UNSIGNED_BYTE,
+      flipY: false,
+      sampler: new Cesium.Sampler({
+        minificationFilter: Cesium.TextureMinificationFilter.LINEAR,
+        magnificationFilter: Cesium.TextureMagnificationFilter.LINEAR,
+        wrapS: Cesium.TextureWrap.CLAMP_TO_EDGE,
+        wrapT: Cesium.TextureWrap.CLAMP_TO_EDGE,
+      }),
+      source: canvasOrNull,
+    });
+  }
+
+  _createWhiteTexture() {
+    return new Cesium.Texture({
+      context: this._viewer.scene.context,
+      width: 1,
+      height: 1,
+      pixelFormat: Cesium.PixelFormat.RGBA,
+      pixelDatatype: Cesium.PixelDatatype.UNSIGNED_BYTE,
+      source: {
+        arrayBufferView: new Uint8Array([255, 255, 255, 255]),
+      },
     });
   }
 
@@ -826,11 +950,16 @@ class TerrainFluidSimulation {
 
     let frame = 0;
 
+    const domainMaskUniform = () => this._domainMaskLive ?? this._domainWhiteTexture;
+    const domainEnabledUniform = () => (this._domainEnabled ? 1.0 : 0.0);
+
     const particleIntegrationStage = new FluidComputeStage({
       uniformMap: {
         iFrame: () => frame,
         iChannel0: () => historyTexture,
         initialMass: () => settings.initialWaterLevel,
+        domainMask: domainMaskUniform,
+        domainEnabled: domainEnabledUniform,
       },
       fragmentShaderSource: new Cesium.ShaderSource({
         sources: [sphKernelSource, particleIntegrationSource],
@@ -848,6 +977,8 @@ class TerrainFluidSimulation {
       rainIntensity: () =>
         settings.rainEnabled ? settings.rainIntensity : 0.0,
       rainMask: () => this._rainMaskLive ?? this._rainEmptyTexture,
+      domainMask: domainMaskUniform,
+      domainEnabled: domainEnabledUniform,
     };
 
     const particleSimulationStage = new FluidComputeStage({
@@ -862,6 +993,8 @@ class TerrainFluidSimulation {
       uniformMap: {
         iChannel0: () => simulationTexture,
         heightMap: () => heightMapTexture,
+        domainMask: domainMaskUniform,
+        domainEnabled: domainEnabledUniform,
       },
       fragmentShaderSource: new Cesium.ShaderSource({
         sources: [sphKernelSource, surfaceSmoothingSource],
@@ -1001,6 +1134,12 @@ class TerrainFluidSimulation {
     }
     this._rainEmptyTexture?.destroy();
     this._rainEmptyTexture = null;
+    if (this._domainMaskLive) {
+      this._domainMaskLive.destroy();
+      this._domainMaskLive = null;
+    }
+    this._domainWhiteTexture?.destroy();
+    this._domainWhiteTexture = null;
   }
 
   getInjectedAmount() {
@@ -1050,7 +1189,7 @@ const generateModelMatrix = (
 const main = async () => {
   try {
     await initViewer();
-    window.__app.ready = true;
+      window.__app.ready = true;
   } catch (err) {
     console.error(err);
     setStatus(`❌ 初始化失败：${err.message}`);
@@ -1080,11 +1219,53 @@ window.__app = {
   get editor() {
     return regionEditor;
   },
+  get domainEditor() {
+    return domainEditor;
+  },
+  get domain() {
+    return state.domain;
+  },
+  hasDomain() {
+    return !!state.domain && state.domain.simPoly.length >= 3;
+  },
   statusText() {
     return dom.statusBar?.innerText ?? "";
   },
   activeRegions() {
     return regionEditor ? regionEditor.getActiveRegions().length : -1;
+  },
+  /** 以 uv 比例直接提交一个矩形测试模拟域（供无头测试驱动） */
+  commitTestDomain(insetU = 0.1, insetV = 0.1) {
+    return this.commitDomainUV([
+      [insetU, insetV],
+      [1 - insetU, insetV],
+      [1 - insetU, 1 - insetV],
+      [insetU, 1 - insetV],
+    ]);
+  },
+  /** 提交任意 uv 多边形作为模拟域：走 DomainEditor，触发生成掩膜 + 启动模拟 */
+  commitDomainUV(uvList) {
+    const dem = state.pendingDomainDem;
+    if (!dem || !domainEditor) return { ok: false, reason: "no-pending-domain" };
+    if (!Array.isArray(uvList) || uvList.length < 3)
+      return { ok: false, reason: "need>=3" };
+    const e = dem.extent;
+    domainEditor.startDrawing(e);
+    domainEditor._commit(
+      uvList.map(([u, v]) =>
+        Cesium.Cartographic.fromDegrees(
+          e[0] + u * (e[2] - e[0]),
+          e[1] + (1 - v) * (e[3] - e[1]),
+        ),
+      ),
+    );
+    domainEditor.stopDrawing();
+    return {
+      ok: this.hasDomain(),
+      vertices: state.domain?.simPoly.length ?? 0,
+      hasMask: !!fluid?._domainMaskLive,
+      domainEnabled: fluid?._domainEnabled ?? false,
+    };
   },
   /** 以着色器空间 uv 比例直接提交一个矩形测试雨区 */
   commitTestRegion(insetU = 0.3, insetVNorth = 0.3) {

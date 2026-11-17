@@ -1,5 +1,7 @@
 const Cesium = globalThis.Cesium;
 
+import { pointInPolygon } from "../sim/domainMask.js";
+
 /** 区域边界配色轮换 */
 const PALETTE = [
   "#38bdf8",
@@ -35,6 +37,8 @@ export class RainRegionEditor {
     this._hooks = hooks;
     /** @type {[number,number,number,number]|null} */
     this._extent = null;
+    /** @type {{u:number,v:number}[]|null} 模拟域多边形（着色器空间 uv），雨区必须落在其中 */
+    this._domainPoly = null;
     this.drawing = false;
     /** @type {Map<number, object>} */
     this.regions = new Map();
@@ -184,11 +188,33 @@ export class RainRegionEditor {
 
   /* ------------------------------ 区域提交与维护 ------------------------ */
 
+  /** 设置模拟域多边形（着色器空间 uv）。设置后提交的雨区必须完全落在域内。 */
+  setDomain(domainPoly) {
+    this._domainPoly =
+      Array.isArray(domainPoly) && domainPoly.length >= 3 ? domainPoly : null;
+  }
+
   _commitRegion(cartos) {
     const extent = this._extent;
     if (!extent || !this._withinExtent(cartos[0], extent)) {
       this._status("⚠ 请在模拟范围内部署降雨区域");
       return;
+    }
+
+    // 模拟域约束：雨区所有顶点必须落在模拟域多边形内（射线法）
+    if (this._domainPoly) {
+      const [minLon, minLat, maxLon, maxLat] = extent;
+      const allInside = cartos.every((c) => {
+        const lon = Cesium.Math.toDegrees(c.longitude);
+        const lat = Cesium.Math.toDegrees(c.latitude);
+        const u = clamp01((lon - minLon) / (maxLon - minLon));
+        const v = clamp01(1 - (lat - minLat) / (maxLat - minLat));
+        return pointInPolygon(u, v, this._domainPoly);
+      });
+      if (!allInside) {
+        this._status("⚠ 降雨区域的所有顶点必须落在模拟域（橙色边界）内部");
+        return;
+      }
     }
     const id = nextRegionId++;
     const paletteIdx = (id - 1) % PALETTE.length;

@@ -38,6 +38,31 @@ uniform float rainIntensity;
 // 降雨掩膜：R 通道 ∈[0,1]，north-up，与高程图同规格
 uniform sampler2D rainMask;
 
+// ===== 模拟域约束 =====
+// 域掩膜：R=1 域内，R=0 域外，north-up，与高程图同 uv
+uniform sampler2D domainMask;
+// 是否启用模拟域约束（0=退回原始矩形盒边界，1=启用多边形域）
+uniform float domainEnabled;
+
+// 采样模拟域（域内≈1，域外≈0）
+float domainAt(vec2 worldPos) {
+    if(domainEnabled < 0.5) return 1.0;
+    vec2 uv = clamp(worldPos / float(textureSize), vec2(0.0), vec2(1.0));
+    return texture(domainMask, uv).r;
+}
+
+// 模拟域边界法向（指向域内）。基于掩膜梯度，仅用于边界附近。
+vec2 domainNormal(vec2 worldPos) {
+    if(domainEnabled < 0.5) return vec2(0.0);
+    vec2 uv = clamp(worldPos / float(textureSize), vec2(0.0), vec2(1.0));
+    float e = 2.0 / float(textureSize);
+    float l = texture(domainMask, uv - vec2(e, 0.0)).r;
+    float r = texture(domainMask, uv + vec2(e, 0.0)).r;
+    float d = texture(domainMask, uv - vec2(0.0, e)).r;
+    float u = texture(domainMask, uv + vec2(0.0, e)).r;
+    return vec2(r - l, u - d); // 指向域内（值增大方向）
+}
+
 #define border_h 5.
 
 uniform sampler2D heightMap;
@@ -187,23 +212,42 @@ void Simulation(sampler2D ch, inout particle P, vec2 pos,
         P.M.x += waterAddRate * dt;
     }
 
-    // 降雨注入：掩膜 R 通道编码降雨区域相对强度，持续累加质量进入实时模拟
+    // 降雨注入：掩膜 R 通道编码降雨区域相对强度，持续累加质量进入实时模拟。
+    // 乘域掩膜保证全域降雨也只落在模拟域内（域外不注水）。
     if(rainIntensity > 0.0) {
         vec2 suv = clamp(pos / float(textureSize), vec2(0.0), vec2(1.0));
-        P.M.x += rainIntensity * dt * texture(rainMask, suv).r;
+        P.M.x += rainIntensity * dt * texture(rainMask, suv).r * texture(domainMask, suv).r;
     }
 
     // 积分
     F -= P.V * 0.0005; // 地面摩擦
     P.V += F * dt / P.M.x;
 
-    // 边界处理
+    // 边界处理（原始矩形盒，作为最外层安全边界）
     vec3 N = bN(P.X);
     float vdotN = step(N.z, border_h) * dot(-N.xy, P.V);
     P.V += 0.5 * (N.xy * vdotN + N.xy * abs(vdotN));
 
     if(N.z < 0.0)
         P.V = vec2(0.0);
+
+    // ===== 模拟域边界约束（多边形域，水被限制在域内） =====
+    if(domainEnabled > 0.5) {
+        vec2 duv = clamp(P.X / float(textureSize), vec2(0.0), vec2(1.0));
+        float dom = texture(domainMask, duv).r;
+        if(dom < 0.5) {
+            // 域外：质量快速衰减（域外不积水，_LINEAR 过渡带 <0.1 直接清零）
+            P.M.x *= mix(0.85, 0.0, step(dom, 0.1));
+            // 沿域法向（指向域内）把速度反射回去
+            vec2 dn = domainNormal(P.X);
+            float dnLen = length(dn);
+            if(dnLen > 0.001) {
+                dn /= dnLen;
+                float vn = dot(P.V, dn);
+                if(vn < 0.0) P.V -= 1.5 * vn * dn;
+            }
+        }
+    }
 
     // 速度限制
     float v = length(P.V);
@@ -310,7 +354,10 @@ void main() {
     }
 
     // 输出: x=水密度(高度), y=地形高度, w=总高度(水+地形)
-    out_FragColor = vec4(rho / weight, hei / weight, 0.0, (rho + hei) / weight);
+    // 水密度乘域掩膜：域外 rho=0 → 渲染层绝对无水；地形高度不受影响（保留地形上下文）
+    float waterRho = (rho / weight) * domainAt(pos);
+    float terrainH = hei / weight;
+    out_FragColor = vec4(waterRho, terrainH, 0.0, waterRho + terrainH);
 }
 `;
 

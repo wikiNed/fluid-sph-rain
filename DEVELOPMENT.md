@@ -15,9 +15,10 @@
 5. [核心技术细节](#5-核心技术细节)
    - 5.1 [坐标系与方向约定（必读）](#51-坐标系与方向约定必读)
    - 5.2 [高程图加载与覆盖范围解析](#52-高程图加载与覆盖范围解析)
-   - 5.3 [降雨区域与掩膜管线](#53-降雨区域与掩膜管线)
-   - 5.4 [SPH 着色器改动](#54-sph-着色器改动)
-   - 5.5 [基础地形与底图](#55-基础地形与底图)
+   - 5.3 [模拟域（任意多边形）与域掩膜](#53-模拟域任意多边形与域掩膜)
+   - 5.4 [降雨区域与掩膜管线](#54-降雨区域与掩膜管线)
+   - 5.5 [SPH 着色器改动](#55-sph-着色器改动)
+   - 5.6 [基础地形与底图](#56-基础地形与底图)
 6. [关键修复记录](#6-关键修复记录)
 7. [测试体系](#7-测试体系)
 8. [参数调优指南](#8-参数调优指南)
@@ -28,13 +29,14 @@
 
 ## 1. 功能总览
 
-在上游"固定 PNG 高程图 + 固定经纬度范围"的基础上，实现三项核心需求：
+在上游"固定 PNG 高程图 + 固定经纬度范围"的基础上，实现四项核心需求：
 
 | # | 需求 | 实现 | 关键模块 |
 |---|------|------|----------|
-| 1 | 上传高程图（tif/png 等），系统自动分析覆盖范围并划定模拟区域 | GeoTIFF 解析地理参考得 bbox；普通图片自动裁边 + 底图点击放置（自动采样地形高程贴地） | `src/io/elevationLoader.js` |
-| 2 | 在模拟范围内划定一个或多个降雨区域 | 地球表面交互绘制多边形（任意数量），实体贴地渲染，每区域独立参数面板 | `src/ui/rainRegionEditor.js` |
-| 3 | 降雨区域累加雨量并实时流体模拟 | 雨区栅格化为 GPU 掩膜纹理，SPH 模拟步内持续注入质量 → 贴地积蓄 → 沿地形汇流 | `src/sim/rainMask.js` + `src/sim/shaders.js` |
+| 0 | 上传高程图后先手动划定**任意多边形模拟域**，水体被严格限制在域内 | 上传只做"准备"（解析范围 + DEM 叠置），玩家在高程图范围内点选顶点闭合多边形 → 栅格化为 1024² 域掩膜 → 同时约束物理与渲染 | `src/sim/domainMask.js` + `src/ui/domainEditor.js` |
+| 1 | 上传高程图（tif/png 等），系统自动分析覆盖范围并划定模拟区域 | GeoTIFF 解析地理参考得 bbox；普通图片自动裁边 + 底图点击放置（自动采样地形高程贴地）；覆盖范围作为模拟域的可选边界 | `src/io/elevationLoader.js` |
+| 2 | 在模拟域内划定一个或多个降雨区域 | 地球表面交互绘制多边形（任意数量），**提交时校验所有顶点落在模拟域内**，实体贴地渲染，每区域独立参数面板 | `src/ui/rainRegionEditor.js` |
+| 3 | 降雨区域累加雨量并实时流体模拟 | 雨区栅格化为 GPU 掩膜纹理，SPH 模拟步内持续注入质量 → 贴地积蓄 → 沿地形汇流，域外质量衰减/速度反射/渲染裁剪 | `src/sim/rainMask.js` + `src/sim/shaders.js` |
 
 顺带完成的基础增强：
 
@@ -60,6 +62,10 @@
 
 ![真实地形底图](docs/images/04_real_terrain_basemap.png)
 
+**任意多边形模拟域：水体被橙色五边形边界精确裁剪，域外无水**：
+
+![多边形模拟域裁剪](docs/images/05_irregular_domain_clipping.png)
+
 ## 3. 快速开始
 
 ### 运行应用
@@ -71,9 +77,15 @@ npx http-server -p 8080
 # 浏览器打开 http://127.0.0.1:8080（需 WebGL2，Chrome/Edge 现代版本）
 ```
 
-打开页面会自动加载内置示例（加州 Tuolumne DEM）。之后：上传自己的 GeoTIFF/PNG → 「🌧 绘制降雨区域」画多边形 → GUI 勾选「开始降雨」。
+打开页面会自动加载内置示例（加州 Tuolumne DEM）。完整操作流程变为**三段式**：
 
-### 运行测试（无头浏览器冒烟测试，15 项断言）
+1. **上传高程图**（或等示例加载）→ 系统解析覆盖范围、把 DEM 叠置到真实地形上，但**暂不启动模拟**，状态栏提示"🗺 请划定模拟域"。
+2. **点击「🗺 划定模拟域」**（或上传后自动进入）：在黄色范围框内左键逐点添加顶点，右键 / 双击 / 回车闭合（≥3 点）。提交后生成域掩膜并启动模拟。
+3. **在域内绘制雨区 / 开启降雨**：点击「🌧 绘制降雨区域」在模拟域内画多边形（顶点必须全部落在域内），GUI 勾选「开始降雨」；或直接用「全域降雨」给整个模拟域注水。
+
+水体被严格限制在橙色模拟域边界内，域外无水。
+
+### 运行测试（无头浏览器冒烟测试，24 项断言）
 
 ```bash
 cd test
@@ -85,7 +97,7 @@ npm i                # 安装 puppeteer-core
 npm test             # node smoke.mjs
 ```
 
-测试内容：页面加载 / 示例自动加载 / GeoTIFF 自动定位 / 雨区→掩膜→注入累加→停止 / 全域降雨 / PNG 手动放置 / 无致命错误。输出 `report.json` 与截图。
+测试内容：页面加载 / 示例自动加载后**停在划域阶段（未启动）** / **提交模拟域后启动（域掩膜生成 + 域约束开启）** / GeoTIFF 自动定位后重新划域 / UTM 投影换算后重新划域 / **域外雨区被拒绝、域内雨区成功** / 雨区→掩膜→注入累加→停止 / 全域降雨 / PNG 手动放置后划域 / 无致命错误。输出 `report.json` 与截图。另有 `verify_irregular_domain.mjs` 提交凸五边形域并截图，验证非矩形裁剪。
 
 ## 4. 系统架构
 
@@ -100,10 +112,14 @@ index.html ──┬── Cesium 1.132（内置）
    │ 数据流          │                                │
    │  File ──▶ elevationLoader ──▶ ElevationData      │
    │  {canvas 1024²灰度, min/max, extent|null, info}  │
-   │      │ extent 有效 ──▶ finishStart()              │
+   │      │ extent 有效 ──▶ prepareDomain()（叠置+划域提示，未启动）
    │      │ extent 为空 ──▶ pendingPlaceDem ──▶ 点击   │
    │      │                底图 ──▶ 采样地形高程 ──▶    │
-   │      ▶ startSimulation:                          │
+   │      ▼                                          │
+   │  用户绘制任意多边形模拟域 ─▶ DomainEditor.onChange │
+   │      ──▶ rasterizeDomainMask → onDomainCommitted  │
+   │      ──▶ regionEditor.setDomain(域多边形)          │
+   │      ──▶ startSimulation:                        │
    │    TerrainFluidSimulation(viewer, dem, options)  │
    │      ├─ 5 个 Primitive 阶段（GPU 管线）           │
    │      │   BufferA 积分/初始化 (particleTexture)    │
@@ -111,14 +127,17 @@ index.html ──┬── Cesium 1.132（内置）
    │      │   BufferC 平滑高度场   (surfaceTexture)    │
    │      │   History 回写         (historyTexture)    │
    │      │   Volume 光线步进渲染  (盒体 DrawCommand)  │
-   │      └─ setRainMask(canvas) 重建掩膜纹理          │
+   │      ├─ setRainMask(canvas)   重建雨区掩膜纹理    │
+   │      └─ setDomainMask(canvas) 重建域掩膜纹理      │
    │                                                  │
    │ 交互流                                            │
-   │  工具栏/状态栏 ── RainRegionEditor ── onChange     │
+   │  工具栏 ── DomainEditor（先） ─▶ 域掩膜 ─▶ 模拟启动 │
+   │  工具栏 ── RainRegionEditor（后） ── onChange     │
    │      ──▶ rasterizeRainMask(区域列表) ──▶ fluid    │
-   └──────────────────────────────────────────────────┘
 ```
 
+- **三段式主控流程**：`handleUploadFile` → `prepareDomain(dem)`（解析 + 叠置 + `domainEditor.startDrawing`，**不启动模拟**）→ 用户闭合并提交多边形 → `onDomainCommitted(domain)` → `finishStart(dem, domainMaskCanvas)`。保证"先划模拟域、再在域内划雨区"。
+- 体积盒仍用高程图覆盖范围 `dem.extent` 生成（保证 heightMap uv 与着色器 uv 对齐、地形不错位）；模拟域只是盒内的一个多边形，通过 1024² 域掩膜表达。
 - 上游管线每帧执行 **两次物理子步**：`BufferB(simulationTexture)` 与 `simulationHistoryStage`（同一着色器再跑一遍写 historyTexture），注入发生在两处（同一掩膜、同一强度），累加语义一致。
 - 每次切换数据调用 `teardownSimulation(true)`：销毁 5 个阶段、4 张模拟纹理、DEM/掩膜纹理、边界实体、叠置层，并清空雨区。
 
@@ -163,7 +182,25 @@ index.html ──┬── Cesium 1.132（内置）
 - **普通图片分支**：`createImageBitmap` → 缩到 ≤2048 分析 → `detectContentBounds()` 识别纯色边框/透明边并裁剪（边缘环取主色调，占比 >40% 才认定为边框；裁剪面积 <4% 或 >99.5% 放弃裁剪防误判）→ 亮度转灰度 → 默认高程 0~1000m。
 - **手动放置 + 贴地**：`index.js#placePendingDemAtDegrees` 点击中心后，`rectangleAroundCenter` 按放置宽度算 bbox（经度除 cos(纬度)），再 `sampleTerrainMostDetailed` 采样四角+中心真实高程，`min/max = 地面 -0.1/×0.9 × reliefMeters`，保证盒子浮在真实地表上而非埋入地下。
 
-### 5.3 降雨区域与掩膜管线
+### 5.3 模拟域（任意多边形）与域掩膜
+
+**为什么需要它**：原版水体只能装在"高程图覆盖范围"这个矩形盒里，用户无法指定不规则的计算边界。改为先在高程图范围内画任意多边形作为模拟域，水体被严格限制在域内。
+
+**交互编辑器** `src/ui/domainEditor.js`：工具栏「🗺 划定模拟域」按钮激活后，左键在高程图覆盖范围内逐点添加顶点（点前会校验 `_withinExtent`），右键 / 双击 / 回车闭合（≥3 点），Esc 取消。橙色 `#f59e0b` 贴地多边形 + 顶点标记可视化。提交结果 `domain = { simPoly, cartos, label }`，`simPoly` 是着色器空间 uv 顶点数组。
+
+**栅格化** `src/sim/domainMask.js`：`rasterizeDomainMask(simPoly)` 把多边形填成 1024² 黑白画布（黑底 + 白域），坐标 `y = v·S` 与高程图/雨掩膜同 north-up 约定（§5.1）；`pointInPolygon(u, v, poly)` 射线法供雨区顶点校验。
+
+**三重约束**（`src/sim/shaders.js` + `rainRegionEditor`）：
+
+1. **物理层**：`Simulation()` 末尾，若 `domainEnabled > 0.5`，采样 `domainMask`：域外格子质量按 `mix(0.85, 0.0, step(dom,0.1))` 衰减（越界越狠），并用 `domainNormal()`（掩膜梯度，指向域内）反射速度，`vn<0` 的入射分量被抵消 —— 水撞到域边界会被弹回而非漏出。
+2. **降雨注入**：`P.M.x += rainIntensity × dt × texture(rainMask,suv).r × texture(domainMask,suv).r` —— 全域降雨也不会往域外注水。
+3. **渲染层**：`surfaceSmoothingSource` 输出水密度乘 `domainAt(pos)`（域外为 0），域外绝对不渲染水面；地形高度不受影响。
+
+`fluid.setDomainMask(canvas, enabled)` 管理域掩膜纹理（未启用时回退 1×1 全白纹理，等效无约束）。域多边形切换数据时随 `teardownSimulation(true)` 一并清理。
+
+> 调试教训（§6.4）：`_renderDomain()` 曾误调 `clearDomain(false)` 把刚设置的 `this.domain` 清空，导致 onChange 收到 null、模拟始终不启动；重写为只移除实体。另 `_commit()` 里 `_status()` 必须放在 `_notifyChanged()` **之前**，否则主控在 finishStart 设置的"模拟进行中"会被"模拟域已划定"覆盖。
+
+### 5.4 降雨区域与掩膜管线
 
 ```
 编辑器多边形(着色器空间uv) ──rasterizeRainMask──▶ 1024² 画布
@@ -181,16 +218,16 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
 - 无任何雨区且未开全域时传 `null`，uniform 回退到 1×1 黑纹理，`rainIntensity` 归零，零开销。
 - 编辑器实体：填充多边形（不指定 height → Cesium 自动 GroundPrimitive 贴地）、`clampToGround` 边界线、贴地标注（强度实时刷新）。
 
-### 5.4 SPH 着色器改动
+### 5.5 SPH 着色器改动
 
 `src/sim/shaders.js`（从 index.js 抽出，便于复用与审阅）：
 
-1. **新增 uniform**：`rainIntensity`（全局强度，开关关闭时 CPU 侧传 0）、`rainMask`（采样器）。
-2. **注入点**：`Simulation()` 在原"点源注水"后新增掩膜注入（BufferB 与 History 两个阶段共用，与上游双子步设计一致）。
+1. **新增 uniform**：`rainIntensity`（全局强度，开关关闭时 CPU 侧传 0）、`rainMask`（采样器）、`domainMask`（域掩膜采样器）、`domainEnabled`（域约束开关，0/1）。辅助函数 `domainAt(pos)`（取域内程度）、`domainNormal(pos)`（掩膜梯度法向，指向域内）。
+2. **注入点**：`Simulation()` 在原"点源注水"后新增掩膜注入（BufferB 与 History 两个阶段共用，与上游双子步设计一致），注入量再乘 `domainMask` 保证域外不注水；`Simulation()` 末尾追加域边界约束（§5.3 物理层）。
 3. **全覆盖幽灵初始化**（BufferA）：原版 60% 格子初始化粒子、40% 空格 → 降雨只落在 60% 格子、附着斑驳。改为**每格都初始化 1e-6 幽灵质量**（`max(initialMass, 1e-6)`），雨水可附着于任意地表格，逐渐积蓄成可见薄层。幽灵质量对压力项贡献可忽略，不改变无雨区外观。
 4. **heightScale = 0.25（高程对齐，见 §6.3）**：`getHeight` 的 `terrainH = data.y × heightScale - 0.5`，而 `terrainHeight = DEM归一化 × 4.0`，故 `4.0 × 0.25 = 1` → 盒内地形精确铺满体积盒的 `[minElevation, maxElevation]` 绝对高程区间，与真实地形重合，水面才会"贴"在看得见的地表上。**改 DEM 编码倍率或 heightScale 时必须保持该乘积为 1。**
 
-### 5.5 基础地形与底图
+### 5.6 基础地形与底图
 
 `index.js#initViewer` 加载链：
 
@@ -205,7 +242,7 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
 
 ## 6. 关键修复记录
 
-三个踩坑极深的 bug，记录根因与验证方法，避免后续重蹈：
+三个踩坑极深的 bug，记录根因与验证方法，避免后续重蹈（§6.4/§6.5 为模拟域改造新增）：
 
 ### 6.1 雨区与水体 N-S 镜像（掩膜画布 y 取反）
 
@@ -218,14 +255,28 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
 
 - **现象**：雨区出现大量竖直尖刺状"晶体"，不是贴地水层。
 - **根因**：① 默认雨强 0.05 × 每帧 2 子步 × 60fps = 每秒每格 +6 质量，SPH 压力项 `∝ M0·(M+M0)` 随质量**平方**增长，粒子高频震荡 → 密度场高频噪声被 heightScale 放大成尖刺；② 原版 40% 格子无粒子，雨水无处附着。
-- **修复**：默认雨强 0.008（GUI 上限 0.1、建议 ≤0.02）+ 全覆盖幽灵初始化（§5.4 第 3 条）。
+- **修复**：默认雨强 0.008（GUI 上限 0.1、建议 ≤0.02）+ 全覆盖幽灵初始化（§5.5 第 3 条）。
 
 ### 6.3 水体沉入地形下方（heightScale 不匹配）
 
 - **现象**：水体从雨区多边形上"脱开"，斜视角下投影偏移、看起来在地面以下，汇聚的水被埋住不可见。
 - **根因**：盒内渲染地形只占盒子竖直跨度的 60%（`4.0 × 0.15 = 0.6`），而盒子按真实 `[min,max]` 绝对高程放置 → 内嵌地形比真实地表低约 40% 高差（样例约 700m）。雨区多边形贴真实地形，水体在盒内偏低地形上，斜视角下产生大幅屏幕投影偏移。
-- **修复**：`heightScale = 0.25` 使内嵌地形精确铺满盒子高程区间（§5.4 第 4 条）。
+- **修复**：`heightScale = 0.25` 使内嵌地形精确铺满盒子高程区间（§5.5 第 4 条）。
 - **验证**：侧视截图确认水体完整贴附山体表面、洼地变深、沿山谷外溢。
+
+### 6.4 模拟域提交后模拟不启动（_renderDomain 误清数据）
+
+- **现象**：提交模拟域后状态栏显示"✅ 模拟域已划定"，但流体从未创建，冒烟测试报 `hasMask/domainEnabled=false`。
+- **根因**：`DomainEditor._commit()` 顺序为 `this.domain={…} → _renderDomain(cartos) → _notifyChanged()`，而 `_renderDomain()` 内部第一行 `this.clearDomain(false)` 把刚设置的 `this.domain` 置 null（`clearDomain` 无论 notify 与否都会清空数据）。于是 onChange 收到 null → 主控 `if(!domain)return` 直接返回 → `onDomainCommitted` 未调用。
+- **修复**：`_renderDomain()` 改为只移除实体 `for(const e of this._domainEntities.splice(0)) viewer.entities.remove(e)`，绝不清 `this.domain`。
+- **验证**：冒烟断言 `commitTestDomain` 返回 `ok:true/vertices:4/hasMask:true/domainEnabled:true`，状态"🌊 模拟进行中"。
+
+### 6.5 状态栏被覆盖（回调顺序）
+
+- **现象**：模拟域提交成功、流体已启动，但状态栏停在"✅ 模拟域已划定"而非"🌊 模拟进行中"，冒烟断言失败。
+- **根因**：`_commit()` 里 `_notifyChanged()`（同步触发主控 `finishStart` 设置"🌊 …"）在 `_status("✅ …")` **之前**，编辑器自己的状态后写入把它覆盖了。
+- **修复**：`_commit()` 里先 `_status("✅ 模拟域已划定")` 再 `_notifyChanged()`，让主控状态最后写入胜出。
+- **教训**：同步回调链里的状态写入顺序决定最终显示；"谁最后写谁赢"，枢纽状态应在回调之后不再被覆盖。
 
 ## 7. 测试体系
 
@@ -234,15 +285,16 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
 | 文件 | 作用 |
 |------|------|
 | `server.mjs` | 静态服务器 :8931（服务仓库根目录） |
-| `smoke.mjs` | 18 项断言冒烟测试（含 UTM 投影夹具），输出截图 + `report.json` |
+| `smoke.mjs` | 24 项断言冒烟测试（含模拟域流程 + UTM 投影夹具），输出截图 + `report.json` |
 | `make_tiff.mjs` | 生成两份合成 GeoTIFF 夹具：EPSG:4326 与 EPSG:32650(UTM50N)，128²、北亮南暗渐变，两者覆盖同一经纬度范围以便交叉验证 |
 | `probe_projection.mjs` | 投影解析纯 Node 单测（7 项）：EPSG:4326 直通、无标签拒判、EPSG:32650 换算、CGCS2000 GK 现场构造定义、退化 bbox 拒绝 |
 | `fixture_dem.tif` | 夹具 A 产物（已提交，bbox=[116.2,39.82,116.44,40.06]） |
 | `fixture_utm.tif` | 夹具 B 产物（EPSG:32650，与 A 同覆盖范围，用于验证跨坐标系一致性） |
 | `verify_fix.mjs` / `verify_align2.mjs` | 视觉验证脚本（非对称雨区 + 多机位截图） |
+| `verify_irregular_domain.mjs` | 提交**凸五边形**模拟域 + 全域降雨，截图 `shot_irregular_domain.png` 验证非矩形域精确裁剪水体 |
 | `diag_terrain.mjs` | 检查 terrainProvider/影像层数 |
 
-**断言清单**：页面 ready → Viewer 创建 → 示例自动加载且范围精确匹配 → 模拟构建 → 无着色器错误 → GeoTIFF 自动解析 bbox 精确匹配 → **UTM 投影 GeoTIFF 自动换算范围与同区域地理坐标夹具一致** → 雨区划定/掩膜生成 → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确 → 无致命控制台错误。
+**断言清单**：页面 ready → Viewer 创建 → 示例自动加载后**停在"请划定模拟域"阶段（未启动）** → **提交模拟域 → 域掩膜生成 + 域约束开启 + 流体启动（"🌊 模拟进行中"）** → 无着色器错误 → GeoTIFF 自动解析 bbox 后重新划域 → **UTM 投影 GeoTIFF 自动换算范围与同区域地理坐标夹具一致**后重新划域 → **域外雨区被拒绝、域内雨区成功 + 掩膜生成** → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确后重新划域 → 无致命控制台错误。
 
 **Node 侧单测**（无需浏览器，秒级）：
 
@@ -274,11 +326,13 @@ chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<dir> `
 ## 9. 已知限制与 TODO
 
 - **投影坐标系 GeoTIFF（UTM / CGCS2000 高斯克吕格 / Lambert 等）**：✅ 已实现自动换算。`src/io/projection.js` 通过 GeoKey 解析 → proj4 转换，覆盖 WGS84 UTM（proj4 内置 326xx/327xx）与需要现场构造定义的中国 CGCS2000 系列（EPSG:4490 等），无地理参考或换算失败时降级手动放置并说明原因。
+- **模拟域（任意多边形）**：✅ 已实现"先划域、再划雨区、域内限水"三段式流程（§5.3）。域外质量衰减 + 速度反射 + 渲染裁剪。
 - **降雨无物理蒸发/下渗**：纯质量守恒，长期降雨会持续堆积至盒顶。
 - **单精度掩膜 8bit**：区域强度 0~2 映射到 0~255，重叠取 max，不支持叠加复合语义。
-- **雨区顶点编辑**：暂不支持拖拽顶点/整体平移，只能删除重建。
+- **顶点编辑**：模拟域与雨区均暂不支持拖拽顶点/整体平移，只能删除重建。
+- **模拟域顶点校验**：雨区提交时只校验顶点落在域多边形内（`pointInPolygon`），若雨区边跨越域的凹角、顶点都在内但部分边在外，可能出现局部越界 —— 当前域多边形以凸形为主，凹形复杂域建议多布点。
 - **性能**：1024² 双子步 SPH 在集显上约 30~60fps；大 DEM（>500MB GeoTIFF）解析内存峰值高（geotiff.js 全量解码），可加分块/金字塔。
-- **TODO 候选**：雨区导入导出（GeoJSON）；按 DEM 坡向/汇流累积图预置"天然汇水区"；多文件时序降雨（雨强随时间曲线）；将 `_test` 中的交互式视觉脚本整合为 `npm run verify`。
+- **TODO 候选**：模拟域/雨区导入导出（GeoJSON）；按 DEM 坡向/汇流累积图预置"天然汇水区"；多文件时序降雨（雨强随时间曲线）；将 `_test` 中的交互式视觉脚本整合为 `npm run verify`。
 
 ## 10. 目录结构
 
@@ -288,13 +342,16 @@ fluid-sph-rain/
 ├── index.js                    主控：数据流、放置、模拟生命周期、GUI、测试钩子
 ├── src/
 │   ├── sim/
-│   │   ├── shaders.js          SPH 着色器（rainMask 注入/幽灵初始化/heightScale）
+│   │   ├── shaders.js          SPH 着色器（rainMask/domainMask 注入、幽灵初始化、heightScale、域边界）
 │   │   ├── rainMask.js         雨区多边形 → 掩膜画布（lighten 合成）
+│   │   ├── domainMask.js       模拟域多边形 → 域掩膜画布 + pointInPolygon 射线法
 │   │   └── geoUtils.js         四空间坐标换算（§5.1 约定的唯一实现处）
 │   ├── io/
 │   │   ├── elevationLoader.js  GeoTIFF/图片解析 + 边界检测 + NoData
 │   │   └── projection.js       地理参考解析：GeoKey → proj4 → 经纬度 extent
-│   ├── ui/rainRegionEditor.js  降雨区域交互绘制/管理
+│   ├── ui/
+│   │   ├── domainEditor.js     模拟域（任意多边形）交互绘制/管理
+│   │   └── rainRegionEditor.js 降雨区域交互绘制/管理（含域内顶点校验）
 │   └── render/                 原版渲染阶段（FluidCompute/Volume Stage、纹理工厂）
 ├── libs/                       dat.gui / geotiff / proj4（本地化，离线可用）
 ├── static/                     内置示例高程图（含作者水印）
