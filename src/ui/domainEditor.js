@@ -107,6 +107,10 @@ export class DomainEditor {
     }
     this._commit([...this._pendingCartos]);
     this._clearPending();
+    // 模拟域只有一个：提交后必须结束绘制并销毁拾取 Handler，
+    // 否则它会一直挂在 canvas 上吞掉后续「绘制降雨区域」的点击，
+    // 导致雨区的小多边形被再提交成新的模拟域。
+    this.stopDrawing();
   }
 
   _clearPending() {

@@ -674,6 +674,11 @@ function wireToolbar() {
 
   dom.btnDomain.addEventListener("click", () => {
     if (domainEditor?.drawing) return;
+    // 互斥：进入划域前结束雨区绘制，避免两个编辑器同时抢 canvas 点击
+    if (regionEditor?.drawing) {
+      regionEditor.stopDrawing();
+      dom.btnDraw?.classList.remove("active");
+    }
     if (state.sourceMode === "globe" || !state.pendingDomainDem) {
       startGlobalDomainDraw();
     } else {
@@ -690,6 +695,9 @@ function wireToolbar() {
       dom.btnDraw.classList.remove("active");
       setStatus(`🌊 模拟进行中<br>${state.demInfo}`);
     } else {
+      // 互斥：进入画雨区前必须结束模拟域绘制，否则模拟域编辑器仍在
+      // canvas 上接收左键，雨区顶点会被同时记成新模拟域并覆盖旧域。
+      if (domainEditor?.drawing) domainEditor.stopDrawing();
       regionEditor.startDrawing(state.extent);
       dom.btnDraw.classList.add("active");
     }

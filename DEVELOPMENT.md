@@ -348,6 +348,20 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
   ![降雨后水面可见](docs/images/09_rain_visible.png)
 - **排查教训**：判断"有没有水"不能只看 `累计注入量`（CPU 侧统计，只反映"开关打开且存在雨掩膜"），也不能只靠一次截图；应当 ①读回 GPU 纹理确认密度在涨（`gl.readPixels` + `gl.FLOAT`，读 `_outputTexture._texture`），②对**多时刻截图做像素差分**并用蓝通道判据统计占比，两者一致才算可见。
 
+### 6.9 画降雨区域会把模拟域顶替掉（两个编辑器同时挂着拾取 Handler）
+
+- **现象**：用户先画出外层大框作为模拟域，再点「🌧 绘制降雨区域」画内层小框，结果**小框变成了新的模拟域**，大框消失、模拟范围被缩小到雨区大小。
+- **根因**：`src/ui/domainEditor.js` 的 `_finishPending()` 提交域后只做 `_commit()` + `_clearPending()`，**没有调用 `stopDrawing()`**。于是 `drawing` 仍为 `true`、它注册的 `Cesium.ScreenSpaceEventHandler` 也一直挂在 canvas 上。用户接着画雨区时 `RainRegionEditor` 又注册了一个 Handler，**两个 Handler 同时接收左键点击**：雨区的每个顶点同时被记进模拟域的暂存顶点，用户右键闭合时两个编辑器一起提交 → 模拟域被雨区的小多边形覆盖并重新启动模拟。
+- **修复**：
+  - `src/ui/domainEditor.js` `_finishPending()` 末尾补 `this.stopDrawing()`（模拟域只有一个，提交后必须结束绘制并销毁 Handler）。
+  - `index.js` 工具栏加**互斥**：点「绘制降雨区域」时若 `domainEditor.drawing` 先 `stopDrawing()`；点「划定模拟域」时若 `regionEditor.drawing` 先 `stopDrawing()` 并取消按钮高亮。`RainRegionEditor` 提交后保持绘制态（支持连续画多个雨区），因此互斥必须由主控保证。
+- **回归测试**：`test/verify_region_isolation.mjs` 用**真实鼠标点击**复现：俯视 9000m 点四个角画大框 → 右键闭合 → 等模拟启动 → 点「绘制降雨区域」→ 在框内点四个角画小框 → 右键闭合，然后断言①域顶点数不变②域范围不变③雨区活动数≥1④雨区掩膜已生成⑤流体仍在运行⑥无控制台错误，共 8 项。
+- **测试注意**：域提交后主控会 `camera.flyTo` 到域中心（pitch -55°），**画面坐标已改变**，测试若继续用之前的屏幕坐标点击就会落到域外（报"请在模拟范围内部署降雨区域"）。必须在画雨区前重新 `camera.setView` 而对准域中心。
+
+  大框（模拟域）与内层小框（雨区）共存：
+
+  ![模拟域与雨区共存](docs/images/10_region_isolation.png)
+
 ## 7. 测试体系
 
 `test/` 目录（独立 package，`npm i` 装 puppeteer-core）：
@@ -369,6 +383,8 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
 | `bisect_check.mjs` | 着色器编译二分回归：连真 GPU Chrome CDP :9223，提交多边形域后统计错误弹窗/编译错误（§6.6 定位用） |
 | `debug_drawrain_gpu.mjs` | 真 GPU 复现脚本（用户报告场景）：load → 划域 → 点「绘制降雨区域」全程统计 error-ish 日志与弹窗，修复后应全为 0 |
 | `verify_gpu_fix_visual.mjs` | 真 GPU 划五边形域 + 全域降雨截图 `shot_gpu_fix_visual.png`，并断言无弹窗/无编译错误 |
+| `verify_region_isolation.mjs` | **真实鼠标点击级**回归（8 项）：大框画模拟域 → 再画小框雨区，断言域顶点/范围不变、雨区生效、流体仍在跑（§6.9） |
+| `verify_visibility2.mjs` / `demo_oblique.mjs` | 降雨可见性回归：俯视 / 斜视多时刻截图，配 `analyze_blue.py` 统计蓝色水面占比变化（§6.8） |
 
 **断言清单**：页面 ready → Viewer 创建 → **默认全球模式（无 DEM/无流体、btnGlobe 存在、划域按钮可用）** → **全球模式画多边形→采样真实地形→生成域掩膜+域约束+流体启动（"🌊 模拟进行中"、sourceMode=globe、bbox=多边形范围）** → 无着色器错误 → **域外雨区被拒绝、域内雨区成功 + 掩膜生成** → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → GeoTIFF 自动解析 bbox 后划域 → **UTM 投影换算为同区域经纬度**后划域 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确后划域 → 无致命控制台错误。
 
