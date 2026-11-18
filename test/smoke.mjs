@@ -155,7 +155,12 @@ try {
   record("域内降雨区域划定成功(活动数≥1)", reg.active >= 1 && reg.ok, JSON.stringify(reg));
   record("降雨掩膜纹理已生成", reg.hasMask === true);
 
-  await page.evaluate(() => { window.__app.options.rainEnabled = true; });
+  // 测试里把雨强调高一档，缩短"注入量累加"的等待时间
+  // （软件渲染 SwiftShader 下帧率极低约 1~2fps，默认 0.0004 需要数十秒才可见增长）
+  await page.evaluate(() => {
+    window.__app.options.rainIntensity = 0.02;
+    window.__app.options.rainEnabled = true;
+  });
   const injected = await waitFor(
     async () => {
       const v = await page.evaluate(() => window.__app.injectedAmount());

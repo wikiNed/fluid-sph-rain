@@ -384,8 +384,10 @@ vec2 getHeight(in vec3 p) {
     uv = clamp(uv, 0.0, 1.0);
     vec4 data = texture(iChannel0, uv);
     // data.x = 水密度(水高度), data.y = 地形高度, data.w = 总高度
+    // 水面高度截断在体积盒内（data 与 data.y 同量纲，4.0 = 整盒高），
+    // 否则水灌满后水面会跑到盒顶之外，光线在盒入口即命中，退化成一整块平面色。
     float terrainH = data.y * heightScale;
-    float waterH = (data.y + data.x) * heightScale;
+    float waterH = min(data.y + data.x, 4.0) * heightScale;
     return vec2(terrainH - 0.5, waterH - 0.5);
 }
 

@@ -70,7 +70,7 @@ const options = {
 
   // —— 新增：降雨控制 ——
   rainEnabled: false, // 降雨总开关
-  rainIntensity: 0.008, // 全局降雨强度（每步每格注入质量；建议 0.003~0.02，过大易失稳）
+  rainIntensity: 0.0004, // 全局降雨强度（每子步每格注入质量；每秒注入 = 120 × 该值）
   wholeAreaRain: false, // 是否全域降雨（不勾选则仅在雨区内）
   pointSource: false, // 点击点源注水（原版交互）
 };
@@ -805,8 +805,8 @@ function buildGui() {
       refreshRainSummary();
     });
   fRain
-    .add(options, "rainIntensity", 0, 0.1, 0.001)
-    .name("降雨强度(建议≤0.02)")
+    .add(options, "rainIntensity", 0.0001, 0.003, 0.0001)
+    .name("降雨强度(0.0004≈60秒灌满)")
     .onChange(refreshRainSummary);
   fRain.add(options, "wholeAreaRain").name("全域降雨").onChange((v) => {
     dom.btnWholeRain.classList.toggle("danger-active", v);

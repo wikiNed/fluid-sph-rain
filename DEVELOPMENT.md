@@ -331,6 +331,19 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
 - **验证**：读回测试 `mAvg` 从 0.14 随注入涨到 26.7→71.7→124.2（修复前恒定）；渲染层 surface 水密度 `max` 从 0.038 涨到 18→44→76；默认雨强 0.008 长跑 50s 截图 `docs/images/07_rain_accumulation.png` 终见域内积水（蓝色水层）；`test/smoke.mjs` 23 项 ALL PASS。
 - **测试注意**：验证降雨必须**同时**点 `#btnWholeRain`（生成 rainMask 掩膜）**与**设 `options.rainEnabled=true`（总开关），只点按钮时 `injected` 恒为 0；`injectedAmount()` 是 CPU 统计，不能单独作为 GPU 注水的证据。
 
+### 6.8 降雨"注入量在涨但画面不变"（雨强过大 + 未做盒内截断）
+
+- **现象**：修复 §6.7 后，`累计注入量` 持续增长、读回纹理也能看到水密度在涨（t5→t35 从 7.5 涨到 49.3，约 6.5 倍），但**截图在开启降雨后只发生一次性变化（约 4.27% 像素），之后完全冻结**，肉眼看不到"水在上涨"。
+- **根因（两条叠加）**：
+  1. **雨强过大导致体积盒瞬间灌满**：`#define dt 1.0`、每帧 2 个物理子步，故每秒质量增量 = `120 × rainIntensity`。默认 `rainIntensity=0.008` → 每秒 +0.96；而 `data.x`（水密度）与 `data.y`（地形）同量纲、`4.0` 即代表整个体积盒高度 → 约 1 秒到 `x=1`、约 4 秒到 `x=4` **把整个盒子灌满**，此后画面再也不变。
+  2. **水面未限制在盒内**：`waterH = (data.y + data.x) * heightScale`，`data.x` 超过 `4.0` 后水面跑到体积盒顶面以外，光线步进在盒入口处（`h<0`）立即判定命中 → 整个域渲染成**盒顶一整块均匀色平面**，与水的多少无关。
+- **修复**：
+  - `index.js` 默认 `rainIntensity: 0.008 → 0.0004`（每秒 +0.048，约 5 秒可见、60 秒灌满，能看到持续上涨），GUI 滑杆范围改 `0.0001 ~ 0.003`（步长 0.0001）。
+  - `src/sim/shaders.js` `getHeight()` 中 `waterH` 改为 `min(data.y + data.x, 4.0) * heightScale`，水面被截断在盒内，避免超盒后退化成整块平面。
+  - `test/smoke.mjs` 的注入断言把测试雨强临时调到 `0.02`（软件渲染 SwiftShader 只有约 1~2 fps，默认速率数十秒才够 0.05）。
+- **验证**：真 GPU 下斜视机位截图（`test/demo_oblique.mjs`）蓝色水面占比 before 0.34% → t10 55.1% → t25 55.5%；俯视机位（`test/verify_visibility2.mjs`）blueish 占比 0.35% → t5 83.1% → t15 83.8% → t30 89.9% → t60 92.8%，随水密度单调增长，确认画面随降雨持续变化。
+- **排查教训**：判断"有没有水"不能只看 `累计注入量`（CPU 侧统计，只反映"开关打开且存在雨掩膜"），也不能只靠一次截图；应当 ①读回 GPU 纹理确认密度在涨（`gl.readPixels` + `gl.FLOAT`，读 `_outputTexture._texture`），②对**多时刻截图做像素差分**并用蓝通道判据统计占比，两者一致才算可见。
+
 ## 7. 测试体系
 
 `test/` 目录（独立 package，`npm i` 装 puppeteer-core）：
