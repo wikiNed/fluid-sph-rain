@@ -13,3 +13,4 @@ Thumbs.db
 # 测试运行产物（截图/报告）
 test/shot*.png
 test/report.json
+test/iso_*.png
