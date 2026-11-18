@@ -342,6 +342,10 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
   - `src/sim/shaders.js` `getHeight()` 中 `waterH` 改为 `min(data.y + data.x, 4.0) * heightScale`，水面被截断在盒内，避免超盒后退化成整块平面。
   - `test/smoke.mjs` 的注入断言把测试雨强临时调到 `0.02`（软件渲染 SwiftShader 只有约 1~2 fps，默认速率数十秒才够 0.05）。
 - **验证**：真 GPU 下斜视机位截图（`test/demo_oblique.mjs`）蓝色水面占比 before 0.34% → t10 55.1% → t25 55.5%；俯视机位（`test/verify_visibility2.mjs`）blueish 占比 0.35% → t5 83.1% → t15 83.8% → t30 89.9% → t60 92.8%，随水密度单调增长，确认画面随降雨持续变化。
+
+  斜视机位下雨后水面覆盖真实山地（blueish 0.34% → 54.3%）：
+
+  ![降雨后水面可见](docs/images/09_rain_visible.png)
 - **排查教训**：判断"有没有水"不能只看 `累计注入量`（CPU 侧统计，只反映"开关打开且存在雨掩膜"），也不能只靠一次截图；应当 ①读回 GPU 纹理确认密度在涨（`gl.readPixels` + `gl.FLOAT`，读 `_outputTexture._texture`），②对**多时刻截图做像素差分**并用蓝通道判据统计占比，两者一致才算可见。
 
 ## 7. 测试体系
