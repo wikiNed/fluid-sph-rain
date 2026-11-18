@@ -73,6 +73,10 @@
 
 ![全球地形直接划域](docs/images/06_globe_domain.png)
 
+**降雨持续累积（默认雨强 0.008 长跑 50s，域内积水清晰可见，蓝色水层）**：
+
+![降雨累积](docs/images/07_rain_accumulation.png)
+
 ## 3. 快速开始
 
 ### 运行应用
@@ -316,7 +320,16 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
 - **定位方法**：真 GPU Chrome（ANGLE / NVIDIA RTX 3080 Ti / D3D11）CDP + 二分法（`test/bisect_check.mjs`，提交多边形域后统计错误弹窗与编译错误）。关键对照：① 换成 pre-domain 着色器（git `7b35e72`）→ 同机正常（排除环境）；② 把失败着色器源码放到**全新裸 WebGL2 上下文**编译 → `ok:true`（排除 GLSL 语法）；③ 逐个增减 domain 辅助函数变体。
 - **根因**：**ANGLE/D3D11 的 GLSL→HLSL 翻译器缺陷**——在含 `texelFetch` 的函数里，写**条件 `early return`**（`if(domainEnabled<0.5) return ...`）**或把 `step(uniform)` 乘进采样结果**，会生成非法 HLSL，导致编译失败且日志为空。二者任一都会触发；采样次数本身不是阈值（4 次采样无 early return/stable 可编译）。ShaderToy/SwiftShader 的宽松编译器不暴露该问题。
 - **修复**（`src/sim/shaders.js`）：`domainAt()`、`domainNormal()` 去掉条件 early return 与 step 乘算，改为**纯采样表达式**（`return texelC(domainMask, worldPos).r;` / `.r` 梯度 `vec2(r-l, u-d)`）；依赖"未启用域绑定全白纹理"使返回值天然中性（1.0 / 0 梯度），无需运行时判断；两函数上方加 ANGLE 兼容注释。同步把冒烟测试致命错误正则补全 `failed to compile|translation failed|Fragment shader failed|An error occurred while rendering`。
-- **验证**：`test/bisect_check.mjs` FINAL → dialog=0/compileErr=0；`test/debug_drawrain_gpu.mjs` 真 GPU 上 load/domain/draw-rain 全程 0 错误、0 弹窗；`test/smoke.mjs` 23 项 ALL PASS；`test/verify_gpu_fix_visual.mjs` 真 GPU 截图 `test/shot_gpu_fix_visual.png` 确认水体贴山地汇聚、域外无水、卫星影像正常。
+- **验证**：`test/bisect_check.mjs` FINAL → dialog=0/compileErr=0；`test/debug_drawrain_gpu.mjs` 真 GPU 上 load/domain/draw-rain 全程 0 错误、0 弹窗；`test/smoke.mjs` 23 项 ALL PASS；`test/verify_gpu_fix_visual.mjs` 真 GPU 截图 `docs/images/08_gpu_fix_visual.png` 确认水体贴山地汇聚、域外无水、卫星影像正常。
+
+### 6.7 降雨不累积、不流动（iFrame 恒 0 致每帧重置质量）
+
+- **现象**：用户反馈"现在模拟，雨不会积累，也不会流动"。全域降雨累计注入量持续增长（`injectedAmount` 只是 CPU 侧统计），但地形上始终看不到模拟水体。
+- **定位方法**：用 CDP + `gl.readPixels` + 自建 framebuffer 读取各 stage 的 `_outputTexture`（FLOAT 纹理必须 `gl.FLOAT` 读，Uint8 读全 0 是假象）。关键读数：① history 纹理 z 通道（粒子质量 `M.x`）在所有时刻恒为 `mAvg=0.15792`，与注入量无关；② simulation stage 质量恒 `0.08`（=单次注入量）、history 恒 `0.16`（=2×）；③ 帧循环本身正常（`_frame` 每秒递增约 60）。
+- **根因**：`_buildPipeline` 里 `let frame = 0;` **从未递增**，而 particleIntegrationStage 的 `iFrame: () => frame` 恒返回 0 → BufferA 每帧都执行 `if(iFrame < 1)` 初始化分支，把上一帧 history 传来的累积质量重置为幽灵质量 `max(initialMass,1e-6)`（默认 `initialWaterLevel=0` → `1e-6`）→ 降雨注入被逐帧清零。这是上游 Shadertoy 移植 bug（`iFrame` 本应由平台自动递增），旧版 60% 格子初始化 + 点源注水时未暴露，改成全覆盖幽灵质量 + 降雨后变致命。
+- **修复**（`index.js`）：删除 `let frame = 0;`，`iFrame` 改传实例帧计数 `() => this._frame`（由 `_postRenderCb` 每帧 `this._frame += 1`），并加注释说明"移植到 Cesium 必须手动递增 iFrame"。修复时曾因 edit 误删紧邻的 `const domainMaskUniform = ...` 定义导致 `ReferenceError: domainMaskUniform is not defined`、划域失败（状态卡在"正在采样地形"），已补回。
+- **验证**：读回测试 `mAvg` 从 0.14 随注入涨到 26.7→71.7→124.2（修复前恒定）；渲染层 surface 水密度 `max` 从 0.038 涨到 18→44→76；默认雨强 0.008 长跑 50s 截图 `docs/images/07_rain_accumulation.png` 终见域内积水（蓝色水层）；`test/smoke.mjs` 23 项 ALL PASS。
+- **测试注意**：验证降雨必须**同时**点 `#btnWholeRain`（生成 rainMask 掩膜）**与**设 `options.rainEnabled=true`（总开关），只点按钮时 `injected` 恒为 0；`injectedAmount()` 是 CPU 统计，不能单独作为 GPU 注水的证据。
 
 ## 7. 测试体系
 
@@ -380,6 +393,7 @@ chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<dir> `
 - **单精度掩膜 8bit**：区域强度 0~2 映射到 0~255，重叠取 max，不支持叠加复合语义。
 - **顶点编辑**：模拟域与雨区均暂不支持拖拽顶点/整体平移，只能删除重建。
 - **着色器改动红线（ANGLE/D3D11）**：在含 `texelFetch` 的 GLSL 函数内不要写条件 `early return`、不要把 `step(uniform)` 乘进采样结果，否则真机 GPU 上会出现空日志的 "Fragment shader failed to compile"（§6.6）。改 SPH 着色器后应在真 GPU 上跑 `test/debug_drawrain_gpu.mjs` 回归，仅靠无头 SwiftShader 冒烟测试不足以暴露此类问题。
+- **iFrame 必须手动递增**：`_buildPipeline` 的 `iFrame` uniform 必须传实例帧计数 `() => this._frame`（由 `_postRenderCb` 每帧递增），不可用局部常量。BufferA 依赖 `if(iFrame<1)` 做一次性初始化；iFrame 恒 0 会导致每帧重置粒子质量、降雨永不累积（§6.7）。这是 Shadertoy→Cesium 移植的关键差异。
 - **模拟域顶点校验**：雨区提交时只校验顶点落在域多边形内（`pointInPolygon`），若雨区边跨越域的凹角、顶点都在内但部分边在外，可能出现局部越界 —— 当前域多边形以凸形为主，凹形复杂域建议多布点。
 - **性能**：1024² 双子步 SPH 在集显上约 30~60fps；大 DEM（>500MB GeoTIFF）解析内存峰值高（geotiff.js 全量解码），可加分块/金字塔。
 - **TODO 候选**：模拟域/雨区导入导出（GeoJSON）；按 DEM 坡向/汇流累积图预置"天然汇水区"；多文件时序降雨（雨强随时间曲线）；将 `_test` 中的交互式视觉脚本整合为 `npm run verify`。

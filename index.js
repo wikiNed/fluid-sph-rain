@@ -1044,14 +1044,16 @@ class TerrainFluidSimulation {
     });
     this._heightMapTexture = heightMapTexture;
 
-    let frame = 0;
-
+    // iFrame 使用实例帧计数（由 _postRenderCb 每帧递增）。
+    // 关键：BufferA 用 if(iFrame<1) 做一次性初始化；若 iFrame 恒为 0，
+    // 每帧都会把粒子质量重置为幽灵质量，降雨注入被逐帧清零 → 水不积累不流动。
+    // 上游 shadertoy 由平台自动递增 iFrame，移植到 Cesium 时必须手动传递。
     const domainMaskUniform = () => this._domainMaskLive ?? this._domainWhiteTexture;
     const domainEnabledUniform = () => (this._domainEnabled ? 1.0 : 0.0);
 
     const particleIntegrationStage = new FluidComputeStage({
       uniformMap: {
-        iFrame: () => frame,
+        iFrame: () => this._frame,
         iChannel0: () => historyTexture,
         initialMass: () => settings.initialWaterLevel,
         domainMask: domainMaskUniform,
