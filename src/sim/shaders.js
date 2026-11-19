@@ -471,7 +471,10 @@ vec4 Render(in vec3 ro, in vec3 rd) {
     vec3 tc = vec3(0.0);
     float alpha = 0.0;
 
-    if (wt < ret.y) {
+    // 相机进入体积盒内部时渲染阶段会关闭深度测试（盒内所有面被背面剔除，
+    // 详见 FluidPipelineStages.js volumeInsideRenderState），遮挡完全由这里判断：
+    // 水面必须在「地形命中点」之前才算可见，否则丢弃，避免把山后的水画到山前。
+    if (wt < min(tt, ret.y)) {
         vec3 waterPos = ro + rd * wt;
         float waterDepth = getWaterDepth(waterPos);
 

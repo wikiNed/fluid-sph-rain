@@ -30,7 +30,7 @@
 
 ## 1. 功能总览
 
-在上游"固定 PNG 高程图 + 固定经纬度范围"的基础上，实现四项核心需求：
+在上游"固定 PNG 高程图 + 固定经纬度范围"的基础上，实现以下核心需求：
 
 | # | 需求 | 实现 | 关键模块 |
 |---|------|------|----------|
@@ -41,6 +41,7 @@
 | 4 | 降雨区域累加雨量并实时流体模拟 | 雨区栅格化为 GPU 掩膜纹理，SPH 模拟步内持续注入质量 → 贴地积蓄 → 沿地形汇流，域外质量衰减/速度反射/渲染裁剪 | `src/sim/rainMask.js` + `src/sim/shaders.js` |
 | 5 | **模拟域与每个雨区都标注面积；支持清空模拟状态从 0 重新模拟** | 球面多边形面积公式 → 重心贴地标签显示 `xx.xx km²`（状态栏/GUI 同步汇总）；「🧹 重置模拟」保留域与雨区、只重建流体管线，水量与累计注入归零 | `src/sim/geoUtils.js`（`polygonAreaKm2`/`areaLabel`）+ `index.js`（`restartSimulation`） |
 | 6 | **公共资源标注（路名/地名）+ 降雨时的雨滴下落效果 + 5 档水深配色** | 底图之上叠加 ArcGIS `Reference/World_Transportation`（道路网/路名/公路编号）与 `Reference/World_Boundaries_and_Places`（地名/边界）两层透明瓦片；屏幕空间后处理雨丝（密度随雨强）；水色按 `0–2/2–5/5–10/10–20/>20 m` 五档着色 + 左下角图例 | `index.js`（`addReferenceLayers`）+ `src/render/rainEffect.js` + `src/sim/shaders.js`（`depthRamp`） |
+| 7 | **中文路网/地名标注 + 相机贴近地面（进入体积盒）时水体仍可见** | 新增高德「透明路网+中文注记」叠加层（免 tk，中国境内）与天地图注记层（需自备 tk，无偏移）；体积阶段改为**相机在盒内时关闭背面剔除与深度测试**，由片元着色器自行做地形遮挡判断 | `index.js`（`syncZhLayers` / `ensureAmapZhLayer`）+ `src/render/FluidPipelineStages.js`（`_isCameraInsideBox` + `volumeInsideRenderState`）+ `src/sim/shaders.js`（`wt < min(tt, ret.y)`） |
 
 顺带完成的基础增强：
 
@@ -53,6 +54,8 @@
 - **路名 / 地名公共资源标注**：底图上叠加两层 ArcGIS Reference 透明瓦片——道路网（含路名、公路编号盾牌）与地名标注（城市/村庄/山峰/河流名、行政边界），GUI「标注图层」可分别开关；失败或超时自动跳过，不影响模拟（§5.9）。
 - **降雨雨滴视觉效果**：开启降雨且有启用雨区（或全域降雨）时，屏幕空间后处理绘制三层斜向雨丝，密度随雨强变化，关闭总开关即消失（§5.10）。
 - **5 档水深配色**：水深按 `0–2 m 浅蓝 / 2–5 m 深蓝 / 5–10 m 黄 / 10–20 m 深黄 / >20 m 红` 五档着色，色值与分界可在 GUI「5档水深配色」子面板调整，左下角图例实时同步（§5.11）。
+- **中文路网 / 地名标注**：除 ArcGIS 英文参考层外，新增高德「透明路网 + 中文注记」叠加层（免 tk、中国境内有效，GUI 可开关）与天地图中文注记层（需自备 tk，WGS84 无偏移）；卫星影像 + 中文村镇名/路名可直接叠加查看（§5.9）。
+- **贴近地面也能看到水**：修复相机飞进体积盒内部后水体被整片剔除的问题——盒内改用「不剔除 + 关深度测试 + 片元着色器自遮挡」的渲染状态，任何机位高度都能看到水面与 5 档配色（§5.12 / §6.10）。
 
 ## 2. 效果展示
 
@@ -95,6 +98,10 @@
 **5 档水深配色：浅蓝浅水、深蓝较深、黄/深黄深水，左下角图例实时同步；底图为卫星影像 + 路网/地名标注**：
 
 ![5 档水深配色](docs/images/13_depth_colors.png)
+
+**中文路网 / 地名叠加层（高德透明瓦片，叠在卫星影像上；四川·成都平原为例）**：
+
+![中文路网地名](docs/images/14_zh_labels.png)
 
 ## 3. 快速开始
 
@@ -337,6 +344,17 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 - `addReferenceLayers()` 并行 `ArcGisMapServerImageryProvider.fromUrl()` 加载两层，**每层最多等 6 秒**：网络抖动时不能阻塞场景就绪（最初 await 无上限，曾导致页面 90 秒未就绪）；超时后请求继续在后台跑，返回后仍会把图层补进影像栈。加载失败只 `console.warn`，不影响模拟。
 - GUI「标注图层」folder 两个勾选（`options.refRoads` / `options.refPlaces`，默认开）→ `syncRefLayers()` 同步 `layer.show`。页面加载后影像层总数 = 底图 1 + 参考层 2 = 3。
 
+**中文标注（中国境内）**：上面两层是英文注记，另外提供两种中文叠加源：
+
+| 源 | 地址 | 是否需要 tk | 坐标系 | 说明 |
+|----|------|------------|--------|------|
+| 高德「路网+注记」 | `webst0{s}.is.autonavi.com/appmaptile?style=8&lang=zh_cn&size=1&scl=1` | 免 tk | GCJ-02（火星坐标） | 实测瓦片透明背景（不透明像素约 8.1%），可直接叠在卫星影像上；中文村镇名、道路线、高速编号齐全；**中国境外无瓦片**，与 WGS84 影像有数百米偏移，仅作视觉参考 |
+| 天地图「中文注记」WMTS `cva_w` | `t{s}.tianditu.gov.cn/cva_w/wmts?...&tk={tk}` | 需自备 tk | CGCS2000≈WGS84 | 与影像无偏移，官方服务稳定；tk 在 `console.tianditu.gov.cn` 免费申请，填入 GUI「天地图tk」后自动加层 |
+
+- 高德层用 `UrlTemplateImageryProvider`（`subdomains: ["1","2","3","4"]`，`maximumLevel: 18`）在初始化末尾同步创建（不需要 await，不阻塞场景就绪），默认 `options.refZhAmap = true`；关闭时只 `layer.show = false`，不销毁图层。
+- 天地图层由 `ensureTdtZhLayer()` 惰性创建，`options.tdtToken` 变化时**重建**图层（旧层 `imageryLayers.remove(layer, true)`）；tk 为空时勾选会提示"需要 tk"，不会创建空图层。
+- GUI「标注图层」新增「中文路网/地名(高德)」「中文注记(天地图·需tk)」「天地图tk」三项 → `syncZhLayers()`。测试钩子 `__app.refLayers().zh` 返回 `{amap, amapCreated, tdt, tdtCreated, tdtTokenApplied}`。
+
 ### 5.10 雨滴下落效果（屏幕空间后处理）
 
 `src/render/rainEffect.js` 用 `Cesium.PostProcessStage` 做全屏雨丝，不碰模拟管线：
@@ -365,6 +383,19 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 - 观察到的合理分布（两个雨区、雨强 0.0015，默认 `depthFullM=40`）：45 s 时湿格 69%、均值 6.9 m、最大 27.6 m，五档占比约 22/22/27/28/1 %，随时间各档逐步铺开。
 
 验证：`test/verify_features2.mjs`（29 项）覆盖参考图层数量/开关同步、图例 5 行文案与色块、`depthColorEnabled` → uniform 与图例联动、`depthRangeM = depthFullM`、雨滴 stage 开关与"开/关两帧像素差 42%"的渲染证据、无致命错误，ALL PASS。截图 `docs/images/12_rain_effect.png`、`docs/images/13_depth_colors.png`（出图脚本 `test/demo_rain_only.mjs`、`test/demo_showcase.mjs`）。
+
+### 5.12 相机进入体积盒后的水体可见性（贴地也能看到水）
+
+体积渲染是整个模拟里最容易"贴着地面就什么都看不见"的地方，原因是几何而不是物理：
+
+- 体积盒 = 域宽 × 域高 × `_volumeThickness`（= 域内 `maxElevation − minElevation`），竖直中心为 `_volumeCenterElevation`。盒顶通常比最高峰还高、盒底比最低谷还低，**相机只要降入盒顶以下就进入了盒内**（山区动辄一两千米的盒高，贴地视角几乎必然在盒内）。
+- `FluidVolumeStage` 原来用 `cull: { enabled: true, face: Cesium.CullFace.BACK }` 只画朝向相机的面。相机在盒外时没问题；**一旦进入盒内，盒子的所有面都背对相机 → 全部被剔除 → 水体整片消失**（`gl.readPixels` 对比体积阶段开/关像素差 = 0，而 `surfaceTexture` 里水是实实在在存在的）。
+- 修复分两处（代码在 `src/render/FluidPipelineStages.js` 与 `src/sim/shaders.js`）：
+  1. 新增 `volumeInsideRenderState = { cull: {enabled:false}, depthTest: {enabled:false}, depthMask:false, blending: <同 volumeRenderState> }`；`FluidVolumeStage` 预存 `_inverseModelMatrix` 与盒外/盒内两套 `RenderState`，`update()` 里每帧用 `Cesium.Matrix4.multiplyByPoint(_inverseModelMatrix, camera.positionWC)` 把相机变换到单位盒局部坐标，`|x|,|y|,|z| < 0.52` 即判定在盒内（单位盒是 [-0.5,0.5]³，0.52 留一点余量），据此切换 `command.renderState`。**盒内必须关深度测试**：否则盒子远侧面片的深度必然大于地形，会把其实位于水面前方的水体判掉。
+  2. 关闭深度测试后，遮挡完全由片元着色器负责：水面沿射线步进后的可见条件由 `if (wt < ret.y)` 改为 **`if (wt < min(tt, ret.y))`**（`tt`=地形命中距离，`ret.y`=盒子出射距离），保证"水在地形之前"才绘制，避免把山后的水画到山前。
+- 单位盒的坐标轴约定：**local.y 是竖直（高程）轴**，盒顶 = local.y 0.5，水平方向是 local.x / local.z——写相机判定或调试打印时最容易搞混，别把 y 当水平轴。
+- 实测（真 GPU :9223，夹具 DEM 盒厚 235 m、盒顶 235 m）：修复前盒内机位体积贡献像素 = 0；修复后 h=235/210/180/140（盒内）体积阶段开/关像素差 ≈ 100%，`_insideBox` 在 h=235 处准确翻转；盒内全屏光线步进帧率约 60 fps。`h ≤ 100` 时差异降到 ~3%，是因为相机已钻进 DEM 地形内部、水体被地形挡住，属正常。
+- 验证：`test/verify_features3.mjs` 断言盒外 `_insideBox=false` 且像素差 >1%，盒内（中部/近地面）`_insideBox=true` 且像素差 >1%（修复前 ≈0）。
 
 ## 6. 关键修复记录
 
@@ -453,6 +484,14 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 
   ![模拟域与雨区共存](docs/images/10_region_isolation.png)
 
+### 6.10 相机贴近地面就看不到水（体积阶段背面剔除把盒内视角剔光）
+
+- **现象**：用户反馈"现在缩放到比较靠近地面就看不到水了"——图中 85 km² 的模拟域、雨区正在降雨、累计注入量在涨、雨丝也在下，但画面上完全没有水体。
+- **根因**：`FluidVolumeStage` 的渲染状态用了 `Cesium.CullFace.BACK`。体积盒高度 = 域内高程差（山区可达 1900 m 以上），**相机俯冲/贴近地面时位置落进盒内**，此时盒子的 6 个面相对相机全部是背面，被背面剔除一次性剔光，水体彻底不可见。物理与纹理都正常（`surfaceTexture` 里水量在涨），只是没有片元被光栅化。
+- **修复**：见 §5.12——盒内切换为不剔除 + 关深度测试的渲染状态，遮挡改由片元着色器的 `wt < min(tt, ret.y)` 判断。
+- **排查方法论**：判断"水体有没有被渲染"必须做**像素级证据**：`gl.readPixels` 对比体积阶段 `show=true/false` 两帧，统计 `diff>24` 的像素比例。修复前盒内该比例为 0，修复后约 100%；只截图看一眼、或只看累计注入量，都会被误导（累计注入量是 CPU 侧统计，与 GPU 是否出图无关）。
+- **环境坑**：崩溃的探针脚本会在 Chrome 里遗留多个标签页，每个标签页都跑着 1024² SPH，十几分钟后 GPU/CPU 饱和，连 `/json/list` 都要 120 秒。**探针脚本必须 `try/finally` 关 page**，跑之前先关掉遗留页面。
+
 ## 7. 测试体系
 
 `test/` 目录（独立 package，`npm i` 装 puppeteer-core）：
@@ -483,6 +522,10 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 | `probe_ref_speed.mjs` | 页面内测 `ArcGisMapServerImageryProvider.fromUrl` 两层 Reference 的加载耗时与影像层数 |
 | `demo_rain_only.mjs` / `demo_showcase.mjs` | 生成文档截图：雨滴下落效果（`rain_fx_close.png`）/ 5 档配色全景（`showcase_wide.png`） |
 | `demo_pool.mjs` / `demo_rain_depth.mjs` | 长跑回读 `surfaceTexture` 统计五档直方图 + 多时刻截图（标定 `depthFullM` 用） |
+| `verify_features3.mjs` | **中文标注 + 盒内可见性**回归（24 项）：高德层默认创建/显示、开/关像素差 13%、天地图无 tk 不建层/填 tk 建层/取消勾选隐藏、盒外 `_insideBox=false`、盒内（中部/近地面）`_insideBox=true` 且体积贡献像素 >1%（修复前 ≈0）、5 档图例、无致命错误（§5.9 / §5.12） |
+| `probe_water_inside2.mjs` | 夹具 DEM 盒内机位高度扫描（:9223）：逐高度打印 `_insideBox`/局部坐标/体积阶段开/关像素差 + 截图，是 §6.10 的定位与验证脚本 |
+| `probe_zh_inside.mjs` / `probe_zh_inside2.mjs` / `diag_zh_layer.mjs` | 中文叠加层 / 盒内水平视角出图探针（其中 `diag_zh_layer.mjs` 用来确认影像层顺序，避免后加的底图盖住中文叠加层） |
+| `probe_tiles_zh2.mjs` / `probe_tiles_zh3.mjs` | 中文瓦片源探测（页面内 fetch + `createImageBitmap` 统计透明像素）：确认高德 `webst0{s}...style=8&scl=1` 为透明叠加层（不透明像素 8.1%），天地图/Esri/OSM 在当时网络下不可达 |
 
 **断言清单**：页面 ready → Viewer 创建 → **默认全球模式（无 DEM/无流体、btnGlobe 存在、划域按钮可用）** → **全球模式画多边形→采样真实地形→生成域掩膜+域约束+流体启动（"🌊 模拟进行中"、sourceMode=globe、bbox=多边形范围）** → 无着色器错误 → **域外雨区被拒绝、域内雨区成功 + 掩膜生成** → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → GeoTIFF 自动解析 bbox 后划域 → **UTM 投影换算为同区域经纬度**后划域 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确后划域 → 无致命控制台错误。
 
@@ -519,6 +562,8 @@ chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<dir> `
 | `depthColorEnabled` | GUI | 0/1（默认1） | 5 档水深配色开关；关闭回退原「浅水→深水」渐变并隐藏图例 |
 | `rainFx` | GUI「雨滴下落效果」 | 布尔（默认 true） | 屏幕空间雨丝后处理开关；仍需「开始降雨」且有启用雨区（§5.10） |
 | `refRoads` / `refPlaces` | GUI「标注图层」 | 布尔（默认 true） | ArcGIS Reference 道路网 / 地名标注透明叠加层（§5.9） |
+| `refZhAmap` | GUI「标注图层」 | 布尔（默认 true） | 高德中文路网/地名透明叠加层；中国境外无瓦片、GCJ-02 偏移，仅视觉参考（§5.9） |
+| `refTdtLabels` / `tdtToken` | GUI「标注图层」 | 布尔（默认 false）/ 字符串 | 天地图中文注记层；tk 需自备（免费申请），为空时勾选只会提示、不建层（§5.9） |
 
 ## 9. 已知限制与 TODO
 
@@ -533,6 +578,9 @@ chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<dir> `
 - **模拟域顶点校验**：雨区提交时只校验顶点落在域多边形内（`pointInPolygon`），若雨区边跨越域的凹角、顶点都在内但部分边在外，可能出现局部越界 —— 当前域多边形以凸形为主，凹形复杂域建议多布点。
 - **性能**：1024² 双子步 SPH 在集显上约 30~60fps；大 DEM（>500MB GeoTIFF）解析内存峰值高（geotiff.js 全量解码），可加分块/金字塔。
 - **参考图层依赖外网**：道路网/地名标注来自 ArcGIS Reference 服务，离线或服务受限时只是少两层透明叠加（`console.warn` 后自动跳过），不影响模拟；首屏加载时每层最多等 6 秒（§5.9）。
+- **高德中文叠加层的两个限制**：①只覆盖中国境内，境外/远海请求会 404（图层透明，无视觉影响，仅控制台噪声）；②GCJ-02（火星坐标）与 WGS84 影像存在数百米偏移，路名/村庄名位置只能作视觉参考；需要无偏移中文注记时请用天地图 `cva_w`（需自备 tk）。
+- **天地图注记需要 tk**：未填 tk 时勾选「中文注记(天地图·需tk)」只会弹提示、不创建图层；填入后自动创建，`tk` 改了会自动重建图层（§5.9）。
+- **体积盒内渲染开销**：相机在盒内时体积阶段关闭剔除与深度测试，整屏都在光线步进，但仍是每像素固定步数（`depth` 参数），实测盒内 60fps；若在集显上明显掉帧，可把 GUI「渲染质量」调低（§5.12）。
 - **5 档配色的"米"是标定值**：`depthFullM` 默认 40 m，是让 1~2 分钟降雨过程铺满五档的经验值，并非物理水深；需要"真实"米数时应按体积盒跨度换算（§5.11），但那样默认雨强下会很快全红。
 - **TODO 候选**：模拟域/雨区导入导出（GeoJSON）；按 DEM 坡向/汇流累积图预置"天然汇水区"；多文件时序降雨（雨强随时间曲线）；将 `_test` 中的交互式视觉脚本整合为 `npm run verify`；雨滴效果支持雨量粒子/落地涟漪。
 

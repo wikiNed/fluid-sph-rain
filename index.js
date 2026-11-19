@@ -55,6 +55,17 @@ const BASEMAP_SOURCES = {
   // 地名标注：城市/村镇/山峰/河流/湖泊名 + 行政边界
   arcgisPlaces:
     "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer",
+  // —— 中文标注（中国境内）——
+  // 高德「路网 + 中文注记」叠加层：实测瓦片透明背景（不透明像素约 8%），
+  // 可直接叠在卫星影像上；坐标系为 GCJ-02（火星坐标），与 WGS84 影像约有
+  // 数百米偏移，仅作视觉参考。{s} 为 Cesium 的 subdomains 占位符。
+  amapZhOverlay:
+    "https://webst0{s}.is.autonavi.com/appmaptile?style=8&lang=zh_cn&size=1&scl=1&x={x}&y={y}&z={z}",
+  // 天地图「中文注记」WMTS（cva）：WGS84/CGCS2000，与影像无偏移，但必须
+  // 自带 tk（https://console.tianditu.gov.cn 免费申请），URL 里的 {tk}
+  // 由代码用 options.tdtToken 替换。
+  tiandituZhOverlay:
+    "https://t{s}.tianditu.gov.cn/cva_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=cva&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk={tk}",
 };
 
 const colorOptions = {
@@ -137,6 +148,11 @@ const options = {
   // —— 新增：公共参考图层（叠加在卫星影像之上）——
   refRoads: true, // 道路网（含路名 / 公路编号）
   refPlaces: true, // 地名标注 + 行政边界
+
+  // —— 新增：中文标注（中国境内）——
+  refZhAmap: true, // 高德中文路网/地名叠加层（免 tk；GCJ-02 偏移，仅视觉参考）
+  refTdtLabels: false, // 天地图中文注记叠加层（需 tk；CGCS2000 无偏移）
+  tdtToken: "", // 天地图 tk，留空则不加天地图图层
 };
 
 /* ==================================================================== */
@@ -173,6 +189,8 @@ const state = {
   rainFx: null,
   /** 公共参考图层 [{layer, provider, key, label}]（道路网 / 地名标注） */
   refLayers: [],
+  /** 中文标注图层 {amap, tdt, tdtTokenApplied} */
+  zhLayers: { amap: null, tdt: null, tdtTokenApplied: "" },
 };
 
 const dom = {};
@@ -243,6 +261,71 @@ async function addReferenceLayers(messages) {
 /** GUI 勾选变化 → 同步参考图层显隐 */
 function syncRefLayers() {
   for (const r of state.refLayers) r.layer.show = options[r.key] !== false;
+}
+
+/* ---------------- 中文标注图层（高德 / 天地图）---------------- */
+
+/** 高德中文叠加层：透明背景的路网 + 中文地名，免 tk，中国境内有效 */
+function ensureAmapZhLayer() {
+  if (!viewer) return null;
+  if (state.zhLayers.amap) return state.zhLayers.amap;
+  const provider = new Cesium.UrlTemplateImageryProvider({
+    url: BASEMAP_SOURCES.amapZhOverlay,
+    subdomains: ["1", "2", "3", "4"],
+    maximumLevel: 18,
+    credit: "高德地图",
+  });
+  const layer = viewer.imageryLayers.addImageryProvider(provider);
+  layer.show = false;
+  state.zhLayers.amap = layer;
+  return layer;
+}
+
+/** 天地图中文注记层：需要 tk（tk 变化时重建图层） */
+function ensureTdtZhLayer() {
+  if (!viewer) return null;
+  const token = String(options.tdtToken || "").trim();
+  if (!token) return null;
+  if (state.zhLayers.tdt && state.zhLayers.tdtTokenApplied === token) {
+    return state.zhLayers.tdt;
+  }
+  if (state.zhLayers.tdt) {
+    try {
+      viewer.imageryLayers.remove(state.zhLayers.tdt, true);
+    } catch (err) {
+      console.warn("移除旧天地图图层失败:", err);
+    }
+    state.zhLayers.tdt = null;
+  }
+  const provider = new Cesium.UrlTemplateImageryProvider({
+    url: BASEMAP_SOURCES.tiandituZhOverlay.replace(
+      "{tk}",
+      encodeURIComponent(token),
+    ),
+    subdomains: ["0", "1", "2", "3", "4", "5", "6", "7"],
+    maximumLevel: 18,
+    credit: "天地图",
+  });
+  const layer = viewer.imageryLayers.addImageryProvider(provider);
+  layer.show = false;
+  state.zhLayers.tdt = layer;
+  state.zhLayers.tdtTokenApplied = token;
+  return layer;
+}
+
+/** 把 options.refZhAmap / refTdtLabels / tdtToken 同步到中文标注图层 */
+function syncZhLayers() {
+  if (!viewer) return;
+  const amap = ensureAmapZhLayer();
+  if (amap) amap.show = options.refZhAmap !== false;
+  const wantTdt = !!options.refTdtLabels;
+  if (!wantTdt && !state.zhLayers.tdt) return;
+  const tdt = ensureTdtZhLayer();
+  if (tdt) {
+    tdt.show = wantTdt;
+  } else if (wantTdt) {
+    setStatus("⚠ 天地图注记需要 tk：请到 console.tianditu.gov.cn 免费申请后填入「天地图 tk」");
+  }
 }
 
 /** 当前雨量强度 → 0~1.25 的雨丝密度（雨强越大雨丝越密） */
@@ -341,6 +424,8 @@ async function initViewer() {
 
   // 公共参考图层（道路网 + 地名标注）叠在底图之上
   await addReferenceLayers(layerMessages);
+  // 中文标注（高德透明叠加层；天地图需 tk，未填则不加）
+  syncZhLayers();
 
   const baseLayerMessage = layerMessages.join(" + ");
 
@@ -1006,6 +1091,15 @@ function buildGui() {
     .add(options, "refPlaces")
     .name("地名标注")
     .onChange(syncRefLayers);
+  fRef
+    .add(options, "refZhAmap")
+    .name("中文路网/地名(高德)")
+    .onChange(syncZhLayers);
+  fRef
+    .add(options, "refTdtLabels")
+    .name("中文注记(天地图·需tk)")
+    .onChange(syncZhLayers);
+  fRef.add(options, "tdtToken").name("天地图tk").onChange(syncZhLayers);
   fRef.close();
 
   /* ---- 模拟参数（原版 + 点源开关）---- */
@@ -1671,7 +1765,7 @@ window.__app = {
   get rainFx() {
     return state.rainFx;
   },
-  /** 参考图层状态（测试用）：影像层数量 + 道路网/地名标注显隐 */
+  /** 参考图层状态（测试用）：影像层数量 + 道路网/地名标注/中文标注显隐 */
   refLayers() {
     return {
       imageryCount: viewer?.imageryLayers?.length ?? 0,
@@ -1680,11 +1774,19 @@ window.__app = {
         key: r.key,
         show: !!r.layer.show,
       })),
+      zh: {
+        amap: !!state.zhLayers.amap?.show,
+        amapCreated: !!state.zhLayers.amap,
+        tdt: !!state.zhLayers.tdt?.show,
+        tdtCreated: !!state.zhLayers.tdt,
+        tdtTokenApplied: state.zhLayers.tdtTokenApplied,
+      },
     };
   },
-  /** 把 options.refRoads / refPlaces 同步到参考图层显隐（GUI 勾选会自动调用；测试可直接改 options 后调本方法） */
+  /** 把 options 里的参考/中文图层勾选同步到实际显隐（GUI 勾选会自动调用；测试可直接改 options 后调本方法） */
   applyRefLayerVisibility() {
     syncRefLayers();
+    syncZhLayers();
     return this.refLayers();
   },
   /** 雨滴视觉效果状态（测试用） */

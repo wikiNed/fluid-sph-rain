@@ -24,6 +24,15 @@ test/rain_*.png
 test/rainfx_*.png
 test/showcase_*.png
 test/diag_*.png
+test/zoom*.png
 test/probe_*.png
 test/ref_*.png
 test/verify_*_shot.png
+test/verify3_*.png
+test/inside*.png
+test/zh_*.png
+test/zh2_*.png
+test/tile*.png
+test/check_page.png
+test/*.json
+!test/package.json
