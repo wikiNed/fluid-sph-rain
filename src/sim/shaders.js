@@ -368,6 +368,18 @@ uniform int depth;
 uniform vec3 shallow;
 uniform vec3 deep;
 uniform float waterAlpha;
+// —— 5 档水深配色（0/2/5/10/20 米）——
+uniform vec3 depthColor0;
+uniform vec3 depthColor1;
+uniform vec3 depthColor2;
+uniform vec3 depthColor3;
+uniform vec3 depthColor4;
+uniform float depthBand0;
+uniform float depthBand1;
+uniform float depthBand2;
+uniform float depthBand3;
+uniform float depthRangeM;
+uniform float depthColorEnabled;
 in vec3 vo;
 in vec3 vd;
 
@@ -391,12 +403,25 @@ vec2 getHeight(in vec3 p) {
     return vec2(terrainH - 0.5, waterH - 0.5);
 }
 
-// 获取水深
+// 获取水深（归一化：0~1 表示占满整个体积盒）
 float getWaterDepth(in vec3 p) {
     vec2 uv = p.xz + 0.5;
     uv = clamp(uv, 0.0, 1.0);
     vec4 data = texture(iChannel0, uv);
     return data.x * heightScale;
+}
+
+// 5 档水深配色：把实际水深（米）映射到 5 段颜色。
+// 入参为米，uniform 均为 sRGB，这里统一走 czm_gammaCorrect 转到线性空间。
+// 使用 smoothstep 过渡（±0.25m 羽化）而不是 if/step(uniform)，避免
+// ANGLE/D3D11 把 uniform 分支编译成非法 HLSL（见开发记录 §6.6）。
+vec3 depthRamp(float depthM) {
+    vec3 c = czm_gammaCorrect(depthColor0);
+    c = mix(c, czm_gammaCorrect(depthColor1), smoothstep(depthBand0 - 0.25, depthBand0 + 0.25, depthM));
+    c = mix(c, czm_gammaCorrect(depthColor2), smoothstep(depthBand1 - 0.25, depthBand1 + 0.25, depthM));
+    c = mix(c, czm_gammaCorrect(depthColor3), smoothstep(depthBand2 - 0.25, depthBand2 + 0.25, depthM));
+    c = mix(c, czm_gammaCorrect(depthColor4), smoothstep(depthBand3 - 0.25, depthBand3 + 0.25, depthM));
+    return c;
 }
 
 // 计算法线
@@ -475,6 +500,18 @@ vec4 Render(in vec3 ro, in vec3 rd) {
                 czm_gammaCorrect(shallow),
                 czm_gammaCorrect(deep),
                 smoothstep(0.0, 0.1, waterDepth)
+            );
+
+            // 5 档水深配色：waterDepth 是“占体积盒高度的归一化比例”，
+            // 乘以「满档水深」标定值 depthRangeM（米，默认 40，可调）得到图例米数。
+            // 注意不能用体积盒真实跨度（高程差常见上千公里级），否则几秒内
+            // 全部落进 >20m 红色档，五档配色失去区分度（见开发记录 §5.10）。
+            // 用 clamp 出的 0/1 系数做 mix，避免 uniform 分支被 ANGLE 编译成非法 HLSL。
+            float depthColorMix = clamp(depthColorEnabled, 0.0, 1.0);
+            waterColor = mix(
+                waterColor,
+                depthRamp(waterDepth * depthRangeM),
+                depthColorMix
             );
 
             // 高光

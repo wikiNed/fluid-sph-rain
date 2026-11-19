@@ -103,6 +103,50 @@
         display: none;
       }
 
+      /* ===== 5 档水深图例（左下角，随 GUI 配色实时更新）===== */
+      #depthLegend {
+        position: fixed;
+        left: 14px;
+        bottom: 18px;
+        z-index: 9998;
+        background: rgba(15, 23, 42, 0.84);
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        border-radius: 8px;
+        padding: 8px 10px;
+        backdrop-filter: blur(6px);
+        font-family: system-ui, sans-serif;
+        font-size: 11.5px;
+        color: #cbd5e1;
+        user-select: none;
+        pointer-events: none;
+        display: none;
+      }
+      #depthLegend .dl-title {
+        font-size: 11px;
+        color: #7dd3fc;
+        margin-bottom: 5px;
+        letter-spacing: 0.5px;
+      }
+      #depthLegend .dl-items {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      #depthLegend .dl-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      #depthLegend .dl-swatch {
+        width: 26px;
+        height: 11px;
+        border-radius: 2px;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+      }
+      #depthLegend .dl-text {
+        font-variant-numeric: tabular-nums;
+      }
+
       .dg.ac {
         z-index: 9998 !important;
       }
@@ -127,6 +171,12 @@
 
     <div id="statusBar">
       正在初始化三维场景…
+    </div>
+
+    <!-- 5 档水深图例：由 index.js 的 updateDepthLegend() 生成行内容 -->
+    <div id="depthLegend">
+      <div class="dl-title">水深图例（米）</div>
+      <div class="dl-items"></div>
     </div>
   </body>
 </html>

@@ -40,6 +40,7 @@
 | 3 | 在模拟域内划定一个或多个降雨区域 | 地球表面交互绘制多边形（任意数量），**提交时校验所有顶点落在模拟域内**，实体贴地渲染，每区域独立参数面板 | `src/ui/rainRegionEditor.js` |
 | 4 | 降雨区域累加雨量并实时流体模拟 | 雨区栅格化为 GPU 掩膜纹理，SPH 模拟步内持续注入质量 → 贴地积蓄 → 沿地形汇流，域外质量衰减/速度反射/渲染裁剪 | `src/sim/rainMask.js` + `src/sim/shaders.js` |
 | 5 | **模拟域与每个雨区都标注面积；支持清空模拟状态从 0 重新模拟** | 球面多边形面积公式 → 重心贴地标签显示 `xx.xx km²`（状态栏/GUI 同步汇总）；「🧹 重置模拟」保留域与雨区、只重建流体管线，水量与累计注入归零 | `src/sim/geoUtils.js`（`polygonAreaKm2`/`areaLabel`）+ `index.js`（`restartSimulation`） |
+| 6 | **公共资源标注（路名/地名）+ 降雨时的雨滴下落效果 + 5 档水深配色** | 底图之上叠加 ArcGIS `Reference/World_Transportation`（道路网/路名/公路编号）与 `Reference/World_Boundaries_and_Places`（地名/边界）两层透明瓦片；屏幕空间后处理雨丝（密度随雨强）；水色按 `0–2/2–5/5–10/10–20/>20 m` 五档着色 + 左下角图例 | `index.js`（`addReferenceLayers`）+ `src/render/rainEffect.js` + `src/sim/shaders.js`（`depthRamp`） |
 
 顺带完成的基础增强：
 
@@ -49,6 +50,9 @@
 - **模拟环境可重建**：切换数据时完整销毁旧的渲染管线/实体/影像层，可反复上传不同数据。
 - **区域面积标注**：模拟域与每个雨区提交后自动计算球面多边形面积，在重心处贴地显示（`29.64 km²`；小于 1 km² 附 m²），状态栏汇总"模拟域面积 / 雨区数量（合计面积）"（§5.8）。
 - **一键清空模拟状态**：工具栏「🧹 重置模拟」保留模拟域/雨区/相机/高程数据，只重建流体管线，水量与累计注入归零，可从 0 反复试算同一场景（§5.8）。
+- **路名 / 地名公共资源标注**：底图上叠加两层 ArcGIS Reference 透明瓦片——道路网（含路名、公路编号盾牌）与地名标注（城市/村庄/山峰/河流名、行政边界），GUI「标注图层」可分别开关；失败或超时自动跳过，不影响模拟（§5.9）。
+- **降雨雨滴视觉效果**：开启降雨且有启用雨区（或全域降雨）时，屏幕空间后处理绘制三层斜向雨丝，密度随雨强变化，关闭总开关即消失（§5.10）。
+- **5 档水深配色**：水深按 `0–2 m 浅蓝 / 2–5 m 深蓝 / 5–10 m 黄 / 10–20 m 深黄 / >20 m 红` 五档着色，色值与分界可在 GUI「5档水深配色」子面板调整，左下角图例实时同步（§5.11）。
 
 ## 2. 效果展示
 
@@ -84,6 +88,14 @@
 
 ![区域面积标注](docs/images/11_area_labels.png)
 
+**降雨中的雨滴下落效果（三层屏幕空间雨丝，密度随雨强变化）**：
+
+![雨滴下落效果](docs/images/12_rain_effect.png)
+
+**5 档水深配色：浅蓝浅水、深蓝较深、黄/深黄深水，左下角图例实时同步；底图为卫星影像 + 路网/地名标注**：
+
+![5 档水深配色](docs/images/13_depth_colors.png)
+
 ## 3. 快速开始
 
 ### 运行应用
@@ -101,6 +113,7 @@ npx http-server -p 8080
 2. **（可选）改用自有高程图**：点「📂 上传高程图」→ GeoTIFF 自动解析覆盖范围 / 普通图片按提示点击放置 → DEM 叠置到地形上，同样进入"请划定模拟域"阶段。
 3. **在域内绘制雨区 / 开启降雨**：点击「🌧 绘制降雨区域」在模拟域内画多边形（顶点必须全部落在域内），GUI 勾选「开始降雨」；或直接用「全域降雨」给整个模拟域注水。**模拟域与每个雨区提交后都会在重心处显示面积标签**。
 4. **重置试算**：点「🧹 重置模拟」清空水量与累计注入，保留模拟域和雨区，从 0 重新开始；点「🌐 全球地形」则回到默认模式重新划域。
+5. **视觉选项**（右侧 GUI）：「标注图层」可开关道路网 / 地名标注；「降雨控制 → 雨滴下落效果」控制屏幕雨丝；「SPH 流体参数 → 5档水深配色」可改 5 档颜色与 4 个分界、调「满档水深(米)」，左下角图例实时同步。
 
 水体被严格限制在橙色模拟域边界内，域外无水。
 
@@ -314,6 +327,45 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 
 验证：`test/verify_area_reset.mjs`（17 项）覆盖面积数值合理性（多边形面积 < bbox 面积且同量级）、三个标签文本、工具栏按钮可用、重置后注入量归零且可重新累计、域与雨区保留、无致命错误，ALL PASS。截图 `docs/images/11_area_labels.png`。
 
+### 5.9 公共资源标注（道路网 / 路名 / 地名）
+
+在底图影像之上叠加两层 ArcGIS Reference 透明瓦片（`BASEMAP_SOURCES.arcgisTransport` / `arcgisPlaces`）：
+
+- `Reference/World_Transportation`：公路、路名、公路编号盾牌；实测瓦片不透明像素仅约 4.9%，可直接叠在卫星影像上。
+- `Reference/World_Boundaries_and_Places`：城市/村镇/山峰/河流名与行政边界；不透明像素约 2.8%。
+- 不能用 `World_Street_Map`（不透明像素 100%，会完全盖住卫星影像）。
+- `addReferenceLayers()` 并行 `ArcGisMapServerImageryProvider.fromUrl()` 加载两层，**每层最多等 6 秒**：网络抖动时不能阻塞场景就绪（最初 await 无上限，曾导致页面 90 秒未就绪）；超时后请求继续在后台跑，返回后仍会把图层补进影像栈。加载失败只 `console.warn`，不影响模拟。
+- GUI「标注图层」folder 两个勾选（`options.refRoads` / `options.refPlaces`，默认开）→ `syncRefLayers()` 同步 `layer.show`。页面加载后影像层总数 = 底图 1 + 参考层 2 = 3。
+
+### 5.10 雨滴下落效果（屏幕空间后处理）
+
+`src/render/rainEffect.js` 用 `Cesium.PostProcessStage` 做全屏雨丝，不碰模拟管线：
+
+- `uniforms` 全部用函数实时取值：`u_time = performance.now()*0.001`、`u_amount = clamp(rainFxAmount(), 0, 1.5)`。
+- 着色器 3 层叠加 `rainLayer(uv, columns, speed, tailLen, thickness)`：列 hash 相位 + `y = uv.y*3.4 + u_time*speed` 向下移动 + `smoothstep` 生成雨丝头尾；56/96/148 列、权重 0.50/0.70/0.90，`uv.x` 做视口宽高比修正，`uv.x += uv.y*0.06` 产生 3° 风斜；`mix(scene.rgb, rainTint(0.84,0.90,1.0), drops*0.58)`，并整体压暗 `col *= mix(1.0, 0.87, u_amount)`。
+- **必须无分支**：避免 `if` / `early return` / `step(uniform)`——§6.6 已证明 ANGLE/D3D11 会因此生成非法 HLSL，真机 GPU 直接编译失败。
+- 开关：每帧 `updateRainEffect()` 仅在 `options.rainEnabled && options.rainFx && (全域降雨 || 启用雨区数 > 0)` 时 `setEnabled(true)`；`rainFxAmount()` 把雨强按 `rainIntensity / 0.0004` 映射到 0.35~1.25（雨强越大雨丝越密），未降雨/无雨区返回 0。
+- GUI「降雨控制」→「雨滴下落效果」勾选（`options.rainFx`，默认开）。
+
+### 5.11 5 档水深配色
+
+`fluidVolumeFragmentSource` 增加 `depthRamp(depthM)`：用 smoothstep 链在 5 档色之间过渡（同样全程无分支），原「浅水→深水」渐变作为 0 档兜底：
+
+| 档位 | 水深 | 默认颜色 |
+|------|------|----------|
+| 0 | 0 – 2 m | 浅蓝 `#7fd8ff` |
+| 1 | 2 – 5 m | 深蓝 `#0a2f8f` |
+| 2 | 5 – 10 m | 黄 `#ffd400` |
+| 3 | 10 – 20 m | 深黄 `#e0a800` |
+| 4 | > 20 m | 红 `#ff3b30` |
+
+- **米制标定很关键**：SPH 的归一化质量单位与真实降雨量**不是 1:1**，若直接用体积盒真实跨度（= 域内高程差，常 1000~2000 m）换算米数，默认雨强下几秒内所有水都落进 >20 m 红色档，五档配色完全失去区分度。因此引入可调标定值 `options.depthFullM`（默认 **40**）：`depth_m = waterDepth(0~1 占盒比例) × depthFullM`，GUI「5档水深配色」→「满档水深(米)」5~200 可调，改它只影响配色与图例，不影响物理。
+- 颜色 uniform 传 sRGB 原值，着色器内 `czm_gammaCorrect()` 转线性后再混合；`depthColorEnabled` 为 0/1 uniform（默认 1），关闭则回退原渐变。
+- 左下角 `#depthLegend` 图例由 `updateDepthLegend()` 依据颜色/分界实时重建：`0 – 2 m / 2 – 5 m / 5 – 10 m / 10 – 20 m / > 20 m`；分界值在 GUI 里改（`normalizeDepthBands()` 保证递增），关闭分档着色时图例自动隐藏。
+- 观察到的合理分布（两个雨区、雨强 0.0015，默认 `depthFullM=40`）：45 s 时湿格 69%、均值 6.9 m、最大 27.6 m，五档占比约 22/22/27/28/1 %，随时间各档逐步铺开。
+
+验证：`test/verify_features2.mjs`（29 项）覆盖参考图层数量/开关同步、图例 5 行文案与色块、`depthColorEnabled` → uniform 与图例联动、`depthRangeM = depthFullM`、雨滴 stage 开关与"开/关两帧像素差 42%"的渲染证据、无致命错误，ALL PASS。截图 `docs/images/12_rain_effect.png`、`docs/images/13_depth_colors.png`（出图脚本 `test/demo_rain_only.mjs`、`test/demo_showcase.mjs`）。
+
 ## 6. 关键修复记录
 
 五个踩坑极深的 bug + 一个状态栏覆盖问题，记录根因与验证方法，避免后续重蹈（§6.4/§6.5 为模拟域改造新增，§6.6 为真机 GPU 着色器编译失败）：
@@ -427,6 +479,10 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 | `probe_area_math.mjs` | 面积公式纯 Node 单测：0.01°×0.01° @34.5°N = 1.0189 km²（理论 1.019）、顶点反序一致、退化输入（§5.8） |
 | `verify_area_reset.mjs` | **面积标注 + 重置模拟**回归（17 项）：面积数值合理（多边形 < bbox 且同量级）、三个贴地标签文本、`btnReset` 可用、重置后注入量归零且可重新累计、域与雨区保留、无致命错误（§5.8） |
 | `demo_area_labels.mjs` | 生成面积标注演示截图 `shot_area_labels.png`（注意须等 `flyTo` 1.5s 结束后再 `setView`） |
+| `verify_features2.mjs` | **参考图层 + 雨滴效果 + 5 档水深配色**回归（29 项）：影像层数=3、道路网/地名标注加载与开关同步、图例 5 行文案与色块、`depthColorEnabled` → uniform 与图例联动、`depthRangeM=depthFullM`、雨滴 stage 开关与像素差 42% 渲染证据、无致命错误（§5.9~§5.11） |
+| `probe_ref_speed.mjs` | 页面内测 `ArcGisMapServerImageryProvider.fromUrl` 两层 Reference 的加载耗时与影像层数 |
+| `demo_rain_only.mjs` / `demo_showcase.mjs` | 生成文档截图：雨滴下落效果（`rain_fx_close.png`）/ 5 档配色全景（`showcase_wide.png`） |
+| `demo_pool.mjs` / `demo_rain_depth.mjs` | 长跑回读 `surfaceTexture` 统计五档直方图 + 多时刻截图（标定 `depthFullM` 用） |
 
 **断言清单**：页面 ready → Viewer 创建 → **默认全球模式（无 DEM/无流体、btnGlobe 存在、划域按钮可用）** → **全球模式画多边形→采样真实地形→生成域掩膜+域约束+流体启动（"🌊 模拟进行中"、sourceMode=globe、bbox=多边形范围）** → 无着色器错误 → **域外雨区被拒绝、域内雨区成功 + 掩膜生成** → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → GeoTIFF 自动解析 bbox 后划域 → **UTM 投影换算为同区域经纬度**后划域 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确后划域 → 无致命控制台错误。
 
@@ -459,6 +515,10 @@ chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<dir> `
 | `depth` | GUI | 50~500 | 体积渲染光线步进次数（质量/性能权衡） |
 | `globeSampleGrid` | options / GUI「地形采样精度」 | 32~160（默认96） | 全球模式采样网格边长。越大地形越精细但采样/插值越慢；山区建议 ≥64 |
 | `reliefMeters` | GUI | 50~3000（默认600） | 上传无参考图片时体积盒竖直厚度 |
+| `depthFullM` | GUI「5档水深配色」 | 5~200（默认40） | **满档水深标定值**：`depth_m = waterDepth(占盒比例) × depthFullM`。只影响配色/图例，不影响物理；调小让深水更快变红，调大让画面更偏冷色（§5.11） |
+| `depthColorEnabled` | GUI | 0/1（默认1） | 5 档水深配色开关；关闭回退原「浅水→深水」渐变并隐藏图例 |
+| `rainFx` | GUI「雨滴下落效果」 | 布尔（默认 true） | 屏幕空间雨丝后处理开关；仍需「开始降雨」且有启用雨区（§5.10） |
+| `refRoads` / `refPlaces` | GUI「标注图层」 | 布尔（默认 true） | ArcGIS Reference 道路网 / 地名标注透明叠加层（§5.9） |
 
 ## 9. 已知限制与 TODO
 
@@ -472,7 +532,9 @@ chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<dir> `
 - **iFrame 必须手动递增**：`_buildPipeline` 的 `iFrame` uniform 必须传实例帧计数 `() => this._frame`（由 `_postRenderCb` 每帧递增），不可用局部常量。BufferA 依赖 `if(iFrame<1)` 做一次性初始化；iFrame 恒 0 会导致每帧重置粒子质量、降雨永不累积（§6.7）。这是 Shadertoy→Cesium 移植的关键差异。
 - **模拟域顶点校验**：雨区提交时只校验顶点落在域多边形内（`pointInPolygon`），若雨区边跨越域的凹角、顶点都在内但部分边在外，可能出现局部越界 —— 当前域多边形以凸形为主，凹形复杂域建议多布点。
 - **性能**：1024² 双子步 SPH 在集显上约 30~60fps；大 DEM（>500MB GeoTIFF）解析内存峰值高（geotiff.js 全量解码），可加分块/金字塔。
-- **TODO 候选**：模拟域/雨区导入导出（GeoJSON）；按 DEM 坡向/汇流累积图预置"天然汇水区"；多文件时序降雨（雨强随时间曲线）；将 `_test` 中的交互式视觉脚本整合为 `npm run verify`。
+- **参考图层依赖外网**：道路网/地名标注来自 ArcGIS Reference 服务，离线或服务受限时只是少两层透明叠加（`console.warn` 后自动跳过），不影响模拟；首屏加载时每层最多等 6 秒（§5.9）。
+- **5 档配色的"米"是标定值**：`depthFullM` 默认 40 m，是让 1~2 分钟降雨过程铺满五档的经验值，并非物理水深；需要"真实"米数时应按体积盒跨度换算（§5.11），但那样默认雨强下会很快全红。
+- **TODO 候选**：模拟域/雨区导入导出（GeoJSON）；按 DEM 坡向/汇流累积图预置"天然汇水区"；多文件时序降雨（雨强随时间曲线）；将 `_test` 中的交互式视觉脚本整合为 `npm run verify`；雨滴效果支持雨量粒子/落地涟漪。
 
 ## 10. 目录结构
 
@@ -494,6 +556,7 @@ fluid-sph-rain/
 │   │   ├── domainEditor.js     模拟域（任意多边形）交互绘制/管理
 │   │   └── rainRegionEditor.js 降雨区域交互绘制/管理（含域内顶点校验）
 │   └── render/                 原版渲染阶段（FluidCompute/Volume Stage、纹理工厂）
+│       └── rainEffect.js       屏幕空间雨丝后处理（PostProcessStage，§5.10）
 ├── libs/                       dat.gui / geotiff / proj4（本地化，离线可用）
 ├── static/                     内置示例高程图（含作者水印）
 ├── docs/images/                本文档截图

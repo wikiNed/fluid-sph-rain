@@ -14,6 +14,7 @@ import { loadElevationFile } from "./src/io/elevationLoader.js";
 import { sampleTerrainDem } from "./src/io/terrainSampler.js";
 import { RainRegionEditor } from "./src/ui/rainRegionEditor.js";
 import { DomainEditor } from "./src/ui/domainEditor.js";
+import { createRainEffect } from "./src/render/rainEffect.js";
 import { rasterizeRainMask } from "./src/sim/rainMask.js";
 import { rasterizeDomainMask } from "./src/sim/domainMask.js";
 import {
@@ -47,12 +48,59 @@ const BASEMAP_SOURCES = {
   arcgisElevation:
     "https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer",
   osm: "https://tile.openstreetmap.org/",
+  // —— 公共参考图层（透明叠加，2026-11 实测不透明像素仅 3%~5%）——
+  // 道路网：公路/县道/山路，带路名与编号盾牌
+  arcgisTransport:
+    "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer",
+  // 地名标注：城市/村镇/山峰/河流/湖泊名 + 行政边界
+  arcgisPlaces:
+    "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer",
 };
 
 const colorOptions = {
   shallowColor: "#48cae4",
   deepColor: "#023e8a",
 };
+
+/**
+ * 5 档水深配色（sRGB，GUI 可改）。
+ * 映射：<2m 浅蓝 → 2~5m 深蓝 → 5~10m 黄 → 10~20m 深黄 → >20m 红。
+ * 分档依据是实测水深分布：默认雨强下 10s 中位数约 2.9m、20s 约 5.5m、
+ * 35s 最大约 22m，正好覆盖这套档位（见开发记录 §5.10）。
+ */
+const depthColorOptions = {
+  c0: "#7fd8ff", // 0 ~ 2 m  浅蓝
+  c1: "#0a2f8f", // 2 ~ 5 m  深蓝
+  c2: "#ffd400", // 5 ~ 10 m 黄
+  c3: "#e0a800", // 10 ~ 20m 深黄
+  c4: "#ff3b30", // > 20 m   红
+};
+
+/** 5 档水深的分界值（米），必须严格递增，GUI 修改时会自动修正顺序 */
+const depthBands = { b0: 2, b1: 5, b2: 10, b3: 20 };
+
+/** 传给着色器的 vec3 uniform（sRGB 原值，着色器里再 gammaCorrect） */
+const depthColorUniforms = {
+  c0: new Cesium.Cartesian3(1, 1, 1),
+  c1: new Cesium.Cartesian3(1, 1, 1),
+  c2: new Cesium.Cartesian3(1, 1, 1),
+  c3: new Cesium.Cartesian3(1, 1, 1),
+  c4: new Cesium.Cartesian3(1, 1, 1),
+};
+
+function cssColorToUniform(css) {
+  const c = Cesium.Color.fromCssColorString(css);
+  return new Cesium.Cartesian3(c.red, c.green, c.blue);
+}
+
+function syncDepthColorUniforms() {
+  depthColorUniforms.c0 = cssColorToUniform(depthColorOptions.c0);
+  depthColorUniforms.c1 = cssColorToUniform(depthColorOptions.c1);
+  depthColorUniforms.c2 = cssColorToUniform(depthColorOptions.c2);
+  depthColorUniforms.c3 = cssColorToUniform(depthColorOptions.c3);
+  depthColorUniforms.c4 = cssColorToUniform(depthColorOptions.c4);
+}
+
 const options = {
   // —— 模拟参数（沿用原版）——
   waterAddRate: 0.03, // 点源注水速率
@@ -74,6 +122,21 @@ const options = {
   rainIntensity: 0.0004, // 全局降雨强度（每子步每格注入质量；每秒注入 = 120 × 该值）
   wholeAreaRain: false, // 是否全域降雨（不勾选则仅在雨区内）
   pointSource: false, // 点击点源注水（原版交互）
+
+  // —— 新增：雨滴视觉效果（屏幕空间雨丝，纯视觉）——
+  rainFx: true, // 降雨时是否显示下落的雨滴
+
+  // —— 新增：5 档水深配色 ——
+  depthColorEnabled: true, // 是否用 5 档水深配色替换默认浅水→深水渐变
+  // 满档水深（米）：着色器里的水深是“占体积盒高度的归一化比例”，
+  // 该比例 × depthFullM 才得到图例上的“米”。因为 SPH 的归一化质量单位
+  // 与真实降雨量并非 1:1（实际水深可达数百米），必须用一个可调标定值
+  // 把默认雨强下 1~2 分钟降雨过程的深度变化铺满 0~20m 五档。
+  depthFullM: 40,
+
+  // —— 新增：公共参考图层（叠加在卫星影像之上）——
+  refRoads: true, // 道路网（含路名 / 公路编号）
+  refPlaces: true, // 地名标注 + 行政边界
 };
 
 /* ==================================================================== */
@@ -106,6 +169,10 @@ const state = {
   /** 当前模拟使用的高程数据包与域掩膜画布（供「重置模拟」从 0 重新开始） */
   currentDem: null,
   domainMaskCanvas: null,
+  /** 雨滴屏幕空间后处理阶段（{stage,setEnabled,...}） */
+  rainFx: null,
+  /** 公共参考图层 [{layer, provider, key, label}]（道路网 / 地名标注） */
+  refLayers: [],
 };
 
 const dom = {};
@@ -121,6 +188,86 @@ function setStatus(html) {
 /* ==================================================================== */
 /* 初始化                                                                */
 /* ==================================================================== */
+
+/**
+ * 公共参考图层：在底图影像之上叠加「道路网」与「地名标注」。
+ *
+ * 两个服务都是 ArcGIS Reference 系列，瓦片本身透明（实测不透明像素仅
+ * 3%~5%），因此可以直接叠在卫星影像上而不遮挡地表；道路网自带路名与
+ * 公路编号盾牌，地名标注带城市/村镇/山峰/河流名与行政边界。
+ */
+async function addReferenceLayers(messages) {
+  const defs = [
+    { key: "refRoads", label: "道路网", url: BASEMAP_SOURCES.arcgisTransport },
+    { key: "refPlaces", label: "地名标注", url: BASEMAP_SOURCES.arcgisPlaces },
+  ];
+  state.refLayers = [];
+  // 并行加载，且每个图层最多等 6 秒：网络抖动/被限流时不能阻塞场景就绪。
+  // 超时后请求继续在后台进行，一旦返回仍会把图层加到影像栈里。
+  await Promise.all(
+    defs.map(
+      (d) =>
+        new Promise((resolve) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            console.warn(`${d.label}图层加载超时（后台继续）`);
+            resolve(false);
+          }, 6000);
+          Cesium.ArcGisMapServerImageryProvider.fromUrl(d.url)
+            .then((provider) => {
+              const layer = viewer.imageryLayers.addImageryProvider(provider);
+              layer.show = options[d.key] !== false;
+              state.refLayers.push({ layer, key: d.key, label: d.label });
+              messages.push(d.label);
+              if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                resolve(true);
+              }
+            })
+            .catch((err) => {
+              console.warn(`${d.label}图层加载失败（不影响模拟）:`, err);
+              if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                resolve(false);
+              }
+            });
+        }),
+    ),
+  );
+}
+
+/** GUI 勾选变化 → 同步参考图层显隐 */
+function syncRefLayers() {
+  for (const r of state.refLayers) r.layer.show = options[r.key] !== false;
+}
+
+/** 当前雨量强度 → 0~1.25 的雨丝密度（雨强越大雨丝越密） */
+function rainFxAmount() {
+  if (!options.rainEnabled) return 0;
+  const active = regionEditor ? regionEditor.getActiveRegions().length : 0;
+  if (!options.wholeAreaRain && active === 0) return 0;
+  const k = Number(options.rainIntensity) / 0.0004; // 默认雨强 = 1.0
+  const base = Number.isFinite(k) ? 0.35 + k * 0.45 : 0.7;
+  return Math.min(1.25, Math.max(0.35, base));
+}
+
+/**
+ * 每帧同步雨滴效果开关：只有「降雨总开关 + 雨滴效果都开」且
+ * 存在启用的雨区（或勾选全域降雨）时才显示雨丝。
+ */
+function updateRainEffect() {
+  if (!state.rainFx) return;
+  const active = regionEditor ? regionEditor.getActiveRegions().length : 0;
+  const raining =
+    !!options.rainEnabled &&
+    !!options.rainFx &&
+    (options.wholeAreaRain || active > 0);
+  state.rainFx.setEnabled(raining);
+}
 
 async function initViewer() {
   const baseOpts = {
@@ -192,12 +339,19 @@ async function initViewer() {
     }
   }
 
+  // 公共参考图层（道路网 + 地名标注）叠在底图之上
+  await addReferenceLayers(layerMessages);
+
   const baseLayerMessage = layerMessages.join(" + ");
 
   viewer.scene.msaaSamples = 4;
   viewer.scene.highDynamicRange = true;
   viewer.postProcessStages.fxaa.enabled = true;
   viewer.scene.globe.depthTestAgainstTerrain = true;
+
+  // 雨滴视觉效果（屏幕空间雨丝；是否显示由每帧 updateRainEffect 决定）
+  state.rainFx = createRainEffect(viewer, { amount: rainFxAmount });
+  viewer.scene.postRender.addEventListener(updateRainEffect);
 
   // 降雨区域编辑器（划定模拟域之后才允许绘制雨区）
   regionEditor = new RainRegionEditor(viewer, {
@@ -262,6 +416,8 @@ async function initViewer() {
 
   wireToolbar();
   buildGui();
+  syncDepthColorUniforms();
+  updateDepthLegend();
 
   setStatus(
     `✅ 场景就绪（${baseLayerMessage}）。当前为<strong>全球地形模式</strong>：直接在地形上划一个区域即可开始模拟；也可「📂 上传高程图」使用自有 DEM。`,
@@ -719,6 +875,7 @@ function wireToolbar() {
   dom.btnReset = $("btnReset");
   dom.fileInput = $("fileInput");
   dom.statusBar = $("statusBar");
+  dom.depthLegend = $("depthLegend");
 
   dom.btnGlobe?.addEventListener("click", () => startGlobalDomainDraw());
 
@@ -839,6 +996,18 @@ function buildGui() {
   });
   fData.close();
 
+  /* ---- 标注图层（公共资源）---- */
+  const fRef = gui.addFolder("标注图层");
+  fRef
+    .add(options, "refRoads")
+    .name("道路网(含路名)")
+    .onChange(syncRefLayers);
+  fRef
+    .add(options, "refPlaces")
+    .name("地名标注")
+    .onChange(syncRefLayers);
+  fRef.close();
+
   /* ---- 模拟参数（原版 + 点源开关）---- */
   const fSim = gui.addFolder("SPH流体参数");
   fSim
@@ -857,6 +1026,47 @@ function buildGui() {
     .addColor(colorOptions, "deepColor")
     .name("深水颜色")
     .onChange((v) => (options.deep = Cesium.Color.fromCssColorString(v)));
+
+  /* ---- 5 档水深配色 ---- */
+  const fDepth = fSim.addFolder("5档水深配色");
+  fDepth
+    .add(options, "depthColorEnabled")
+    .name("启用5档着色")
+    .onChange(() => updateDepthLegend());
+  [
+    ["c0", "① 浅蓝 (0-2m)"],
+    ["c1", "② 深蓝 (2-5m)"],
+    ["c2", "③ 黄 (5-10m)"],
+    ["c3", "④ 深黄 (10-20m)"],
+    ["c4", "⑤ 红 (>20m)"],
+  ].forEach(([k, name]) => {
+    fDepth
+      .addColor(depthColorOptions, k)
+      .name(name)
+      .onChange(() => {
+        syncDepthColorUniforms();
+        updateDepthLegend();
+      });
+  });
+  [
+    ["b0", 0.5, 50, 0.5, "①/② 分界(米)"],
+    ["b1", 1, 100, 0.5, "②/③ 分界(米)"],
+    ["b2", 1, 200, 0.5, "③/④ 分界(米)"],
+    ["b3", 1, 500, 0.5, "④/⑤ 分界(米)"],
+  ].forEach(([k, min, max, step, name]) => {
+    fDepth
+      .add(depthBands, k, min, max, step)
+      .name(name)
+      .onChange(() => {
+        normalizeDepthBands();
+        updateDepthLegend();
+      });
+  });
+  fDepth
+    .add(options, "depthFullM", 5, 200, 1)
+    .name("满档水深(米)")
+    .onChange(() => updateDepthLegend());
+  fDepth.close();
   fSim.close();
 
   /* ---- 降雨控制 ---- */
@@ -877,6 +1087,7 @@ function buildGui() {
     .add(options, "rainIntensity", 0.0001, 0.003, 0.0001)
     .name("降雨强度(默认0.0004)")
     .onChange(refreshRainSummary);
+  fRain.add(options, "rainFx").name("雨滴下落效果");
   fRain.add(options, "wholeAreaRain").name("全域降雨").onChange((v) => {
     dom.btnWholeRain.classList.toggle("danger-active", v);
     applyRainRegions();
@@ -893,6 +1104,50 @@ function buildGui() {
   fRain.open();
 
   regionGuiFolder = fRain; // 区域子文件夹挂到降雨控制下
+}
+
+/** 保证 5 档分界值严格递增（GUI 拖动越界时自动排序修正） */
+function normalizeDepthBands() {
+  const vals = [depthBands.b0, depthBands.b1, depthBands.b2, depthBands.b3]
+    .map((v) => Math.max(0.5, Number(v) || 0.5))
+    .sort((a, b) => a - b);
+  depthBands.b0 = vals[0];
+  depthBands.b1 = vals[1];
+  depthBands.b2 = vals[2];
+  depthBands.b3 = vals[3];
+}
+
+/** 同步左下角 5 档水深图例（颜色 / 分界 / 显隐） */
+function updateDepthLegend() {
+  const el = dom.depthLegend;
+  if (!el) return;
+  el.style.display = options.depthColorEnabled ? "block" : "none";
+  const box = el.querySelector(".dl-items");
+  if (!box) return;
+  const colors = [
+    depthColorOptions.c0,
+    depthColorOptions.c1,
+    depthColorOptions.c2,
+    depthColorOptions.c3,
+    depthColorOptions.c4,
+  ];
+  const bands = [0, depthBands.b0, depthBands.b1, depthBands.b2, depthBands.b3];
+  const fmt = (v) =>
+    Math.abs(v - Math.round(v)) < 0.01
+      ? String(Math.round(v))
+      : String(+v.toFixed(1));
+  box.innerHTML = colors
+    .map((css, i) => {
+      const text =
+        i === 4
+          ? `&gt; ${fmt(bands[4])} m`
+          : `${fmt(bands[i])} – ${fmt(bands[i + 1])} m`;
+      return (
+        `<div class="dl-row"><span class="dl-swatch" style="background:${css}"></span>` +
+        `<span class="dl-text">${text}</span></div>`
+      );
+    })
+    .join("");
 }
 
 function refreshRainSummary() {
@@ -1247,6 +1502,22 @@ class TerrainFluidSimulation {
         shallow: () => settings.shallow,
         deep: () => settings.deep,
         waterAlpha: () => settings.waterAlpha,
+        // —— 5 档水深配色 ——
+        // 颜色 uniform 是 sRGB 原值（着色器内 czm_gammaCorrect 转线性）；
+        // depthRangeM 是「满档水深（米）」标定值：waterDepth(0~1) × 它 = 图例米数。
+        // 不能用体积盒真实跨度（=高程差，常见上千公里级），否则默认雨强下
+        // 几秒内就全部落进 >20m 红色档，五档配色完全失去区分度（见 §5.10）。
+        depthColor0: () => depthColorUniforms.c0,
+        depthColor1: () => depthColorUniforms.c1,
+        depthColor2: () => depthColorUniforms.c2,
+        depthColor3: () => depthColorUniforms.c3,
+        depthColor4: () => depthColorUniforms.c4,
+        depthBand0: () => depthBands.b0,
+        depthBand1: () => depthBands.b1,
+        depthBand2: () => depthBands.b2,
+        depthBand3: () => depthBands.b3,
+        depthRangeM: () => Math.max(1, settings.depthFullM),
+        depthColorEnabled: () => (settings.depthColorEnabled ? 1.0 : 0.0),
       },
       geometry,
       modelMatrix,
@@ -1395,6 +1666,67 @@ window.__app = {
   },
   get domain() {
     return state.domain;
+  },
+  /** 雨滴后处理句柄（测试/调试用） */
+  get rainFx() {
+    return state.rainFx;
+  },
+  /** 参考图层状态（测试用）：影像层数量 + 道路网/地名标注显隐 */
+  refLayers() {
+    return {
+      imageryCount: viewer?.imageryLayers?.length ?? 0,
+      layers: state.refLayers.map((r) => ({
+        label: r.label,
+        key: r.key,
+        show: !!r.layer.show,
+      })),
+    };
+  },
+  /** 把 options.refRoads / refPlaces 同步到参考图层显隐（GUI 勾选会自动调用；测试可直接改 options 后调本方法） */
+  applyRefLayerVisibility() {
+    syncRefLayers();
+    return this.refLayers();
+  },
+  /** 雨滴视觉效果状态（测试用） */
+  rainFxInfo() {
+    return {
+      exists: !!state.rainFx,
+      stageEnabled: !!state.rainFx?.getEnabled?.(),
+      optionRainFx: !!options.rainFx,
+      amount: rainFxAmount(),
+    };
+  },
+  /** 5 档水深配色状态（测试用）：bands/colors 按档位顺序返回数组 */
+  depthConfig() {
+    return {
+      enabled: !!options.depthColorEnabled,
+      bands: [depthBands.b0, depthBands.b1, depthBands.b2, depthBands.b3],
+      colors: [
+        depthColorOptions.c0,
+        depthColorOptions.c1,
+        depthColorOptions.c2,
+        depthColorOptions.c3,
+        depthColorOptions.c4,
+      ],
+      fullM: options.depthFullM,
+      legendVisible: dom.depthLegend
+        ? dom.depthLegend.style.display !== "none"
+        : false,
+      legendRows: dom.depthLegend
+        ? dom.depthLegend.querySelectorAll(".dl-row").length
+        : 0,
+    };
+  },
+  /** 测试钩子：外部直接改 options/颜色后，手动同步 uniform 与图例（等价 GUI onChange） */
+  syncDepthColors() {
+    normalizeDepthBands();
+    syncDepthColorUniforms();
+    updateDepthLegend();
+    return this.depthConfig();
+  },
+  /** 体积盒竖直跨度（米）：shader 里 waterDepth(0~1) × 该值 = 真实水深 */
+  volumeThickness() {
+    return fluid?._volumeThickness ?? 0;
   },
   hasDomain() {
     return !!state.domain && state.domain.simPoly.length >= 3;
