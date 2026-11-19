@@ -78,3 +78,58 @@ export function extentAreaLabel(e) {
     e[3] - e[1],
   ).toFixed(4)}°N-S`;
 }
+
+/** 地球平均半径（米），用于球面多边形面积计算 */
+const EARTH_RADIUS_M = 6371008.8;
+
+function pointToRadians(p) {
+  if (!p) return null;
+  // Cesium.Cartographic：longitude / latitude 已经是弧度
+  if (Number.isFinite(p.longitude) && Number.isFinite(p.latitude)) {
+    return { lon: p.longitude, lat: p.latitude };
+  }
+  // {lon, lat} 十进制度
+  if (Number.isFinite(p.lon) && Number.isFinite(p.lat)) {
+    return {
+      lon: Cesium.Math.toRadians(p.lon),
+      lat: Cesium.Math.toRadians(p.lat),
+    };
+  }
+  return null;
+}
+
+/**
+ * 多边形覆盖的地表面积（km²）。
+ *
+ * 用球面多边形面积公式（对每条边沿纬向积分）：
+ *   A = R²/2 · |Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂)|
+ * 顶点顺序顺时针/逆时针均可（结果取绝对值），对几十公里的区域精度优于 1%。
+ *
+ * @param {Array} points Cesium.Cartographic（弧度）或 {lon,lat}（度）顶点数组
+ * @returns {number} 面积 km²，输入不合法时返回 0
+ */
+export function polygonAreaKm2(points) {
+  if (!Array.isArray(points) || points.length < 3) return 0;
+  let sum = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = pointToRadians(points[i]);
+    const b = pointToRadians(points[(i + 1) % points.length]);
+    if (!a || !b) return 0;
+    sum += (b.lon - a.lon) * (Math.sin(a.lat) + Math.sin(b.lat));
+  }
+  const areaM2 = Math.abs(sum) * 0.5 * EARTH_RADIUS_M * EARTH_RADIUS_M;
+  return areaM2 / 1e6;
+}
+
+/**
+ * 面积文本（不含"面积"前缀）：小于 1 km² 时同时给出 m² 与 km² 便于判读。
+ */
+export function areaLabel(km2) {
+  if (!Number.isFinite(km2) || km2 <= 0) return "—";
+  const m2 = Math.round(km2 * 1e6).toLocaleString("en-US");
+  if (km2 < 0.01) return `${m2} m²`;
+  if (km2 < 1) return `${km2.toFixed(3)} km²（${m2} m²）`;
+  if (km2 < 100) return `${km2.toFixed(2)} km²`;
+  if (km2 < 10000) return `${km2.toFixed(1)} km²`;
+  return `${Math.round(km2).toLocaleString("en-US")} km²`;
+}

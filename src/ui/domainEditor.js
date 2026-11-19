@@ -1,4 +1,5 @@
 const Cesium = globalThis.Cesium;
+import { areaLabel, polygonAreaKm2 } from "../sim/geoUtils.js";
 
 /**
  * 模拟域编辑器：在高程图覆盖范围内绘制唯一的模拟域多边形。
@@ -216,10 +217,13 @@ export class DomainEditor {
       cartos: [...cartos],
       label: "模拟域",
       extent: [...extent], // 供主控采样真实地形（全球模式由 bbox 反推）
+      areaKm2: polygonAreaKm2(cartos), // 区域面积（球面多边形公式）
     };
     this._renderDomain(cartos);
     // 先播报提交成功，再通知主控（主控会设置更完整的"模拟进行中"状态覆盖它）
-    this._status(`✅ 模拟域已划定（顶点 ${simPoly.length}）`);
+    this._status(
+      `✅ 模拟域已划定（顶点 ${simPoly.length} · 面积 ${areaLabel(this.domain.areaKm2)}）`,
+    );
     this._notifyChanged();
     return true;
   }
@@ -237,6 +241,15 @@ export class DomainEditor {
     // 只清理旧实体，绝不在此清空 this.domain（否则 _commit 的 onChange 会拿到 null）
     for (const e of this._domainEntities.splice(0)) this._viewer.entities.remove(e);
     const color = Cesium.Color.fromCssColorString("#f59e0b");
+    const dag = cartos.map((c) => ({
+      lon: Cesium.Math.toDegrees(c.longitude),
+      lat: Cesium.Math.toDegrees(c.latitude),
+    }));
+    const center = dag.reduce(
+      (acc, p) => ({ lon: acc.lon + p.lon / dag.length, lat: acc.lat + p.lat / dag.length }),
+      { lon: 0, lat: 0 },
+    );
+    const areaKm2 = this.domain?.areaKm2 ?? polygonAreaKm2(cartos);
 
     this._domainEntities.push(
       this._viewer.entities.add({
@@ -258,6 +271,25 @@ export class DomainEditor {
           width: 3,
           clampToGround: true,
           material: color.withAlpha(0.95),
+        },
+      }),
+      // 区域面积标注（跟随地形表面，位于多边形重心）
+      this._viewer.entities.add({
+        name: "模拟域标签",
+        position: Cesium.Cartesian3.fromDegrees(center.lon, center.lat),
+        label: {
+          text: `模拟域 · 面积 ${areaLabel(areaKm2)}`,
+          font: "bold 13px sans-serif",
+          fillColor: color,
+          outlineColor: Cesium.Color.BLACK.withAlpha(0.85),
+          outlineWidth: 3,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          showBackground: true,
+          backgroundColor: Cesium.Color.BLACK.withAlpha(0.55),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          verticalOrigin: Cesium.VerticalOrigin.CENTER,
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+          pixelOffset: new Cesium.Cartesian2(0, -16),
         },
       }),
     );

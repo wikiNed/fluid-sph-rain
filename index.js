@@ -20,6 +20,7 @@ import {
   rectangleAroundCenter,
   extentIsValid,
   extentAreaLabel,
+  areaLabel,
 } from "./src/sim/geoUtils.js";
 
 // 当前代码来自[少年啦1997]的开源代码，如果你是购买源码，请联系商家进行退款
@@ -102,6 +103,9 @@ const state = {
   drapeLayer: null,
   /** 模拟范围矩形/标签等 UI 实体，随模拟重建一起清理 */
   uiEntities: [],
+  /** 当前模拟使用的高程数据包与域掩膜画布（供「重置模拟」从 0 重新开始） */
+  currentDem: null,
+  domainMaskCanvas: null,
 };
 
 const dom = {};
@@ -527,6 +531,8 @@ function teardownSimulation(alsoClearEntities) {
   state.uiEntities = [];
   rainProgress.injected = "0.000";
   state.extent = null;
+  state.currentDem = null;
+  state.domainMaskCanvas = null;
   refreshButtons();
 }
 
@@ -537,6 +543,9 @@ async function finishStart(dem, domainMaskCanvas) {
   }
   state.extent = dem.extent;
   state.demInfo = `${dem.sourceName}: ${dem.info}`;
+  // 记录当前模拟的输入，供「重置模拟」在不重新采样的前提下从 0 重跑
+  state.currentDem = dem;
+  state.domainMaskCanvas = domainMaskCanvas;
 
   const rect = Cesium.Rectangle.fromDegrees(...dem.extent);
 
@@ -547,12 +556,58 @@ async function finishStart(dem, domainMaskCanvas) {
   applyRainRegions(); // 应用已有雨区（清空后为无雨）
   refreshButtons();
 
-  const nRain = regionEditor.getActiveRegions().length;
-  const domainLabel = state.domain ? `模拟域顶点 ${state.domain.simPoly.length} 个` : "无模拟域";
+  const activeRain = regionEditor.getActiveRegions();
+  const nRain = activeRain.length;
+  const rainArea = activeRain.reduce((s, r) => s + (r.areaKm2 || 0), 0);
+  const domainLabel = state.domain
+    ? `模拟域顶点 ${state.domain.simPoly.length} 个 · 面积 <strong>${areaLabel(
+        state.domain.areaKm2,
+      )}</strong>`
+    : "无模拟域";
+  const rainLabel = nRain
+    ? `雨区数量：<strong>${nRain}</strong>（合计面积 ${areaLabel(rainArea)}）`
+    : `雨区数量：<strong>0</strong>`;
   setStatus(
     `🌊 <strong>模拟进行中</strong><br>数据：${dem.sourceName} · ${dem.info}<br>` +
-      `范围：${extentAreaLabel(dem.extent)} · ${domainLabel} · 雨区数量：<strong>${nRain}</strong><br>` +
-      `提示：「🌧 绘制降雨区域」左键加点 / 右键结束（雨区须在橙色模拟域内）；GUI 中可开启全域降雨或调整强度。`,
+      `范围：${extentAreaLabel(dem.extent)}<br>${domainLabel} · ${rainLabel}<br>` +
+      `提示：「🌧 绘制降雨区域」左键加点 / 右键结束（雨区须在橙色模拟域内）；GUI 中可开启全域降雨或调整强度；「🧹 重置模拟」可清空水量从 0 重跑。`,
+  );
+}
+
+/**
+ * 清空模拟状态、从 0 重新开始模拟。
+ *
+ * 保留：已划定的模拟域、已画的降雨区域、相机视角、当前高程数据；
+ * 重置：粒子质量/水量、累计注入量、帧计数（通过重建 TerrainFluidSimulation 实例）。
+ * 相比「🌐 全球地形」需要重新采样地形、重新划域，这里可以一键反复试算同一场景。
+ */
+function restartSimulation() {
+  if (!fluid) {
+    setStatus("⚠ 当前没有进行中的模拟：请先划定模拟域");
+    return;
+  }
+  const dem = state.currentDem;
+  if (!dem || !extentIsValid(dem.extent)) {
+    setStatus("❌ 缺少高程数据，无法重置模拟");
+    return;
+  }
+  fluid.destroy();
+  fluid = null;
+  rainProgress.injected = "0.000";
+
+  fluid = new TerrainFluidSimulation(viewer, dem, options);
+  fluid.setDomainMask(state.domainMaskCanvas, !!state.domain);
+  applyRainRegions(); // 雨区与降雨开关保持不变，重新开始累计
+  refreshButtons();
+
+  const nRain = regionEditor.getActiveRegions().length;
+  const domainLabel = state.domain
+    ? `模拟域面积 <strong>${areaLabel(state.domain.areaKm2)}</strong>`
+    : "无模拟域";
+  setStatus(
+    `🧹 <strong>已清空模拟状态，从 0 重新开始</strong><br>` +
+      `数据：${dem.sourceName} · ${dem.info}<br>${domainLabel} · 雨区数量：${nRain}<br>` +
+      `提示：降雨开关与雨区保持不变，水量已归零；再次「开始降雨」即可重新累计。`,
   );
 }
 
@@ -621,7 +676,8 @@ function addRangeOutline(rect, dem) {
         backgroundColor: Cesium.Color.BLACK.withAlpha(0.55),
         disableDepthTestDistance: Number.POSITIVE_INFINITY,
         heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-        pixelOffset: new Cesium.Cartesian2(0, -18),
+        // 上移多一些，避免与「模拟域 · 面积」标签（-20px）在重心位置重叠
+        pixelOffset: new Cesium.Cartesian2(0, -64),
       },
     }),
   );
@@ -660,6 +716,7 @@ function wireToolbar() {
   dom.btnDraw = $("btnDraw");
   dom.btnWholeRain = $("btnWholeRain");
   dom.btnClearRegions = $("btnClearRegions");
+  dom.btnReset = $("btnReset");
   dom.fileInput = $("fileInput");
   dom.statusBar = $("statusBar");
 
@@ -711,6 +768,9 @@ function wireToolbar() {
     regionEditor.clearAll();
   });
 
+  // 清空模拟状态：保留模拟域与雨区，水量/累计注入/帧计数全部归零
+  dom.btnReset?.addEventListener("click", () => restartSimulation());
+
   refreshButtons();
 }
 
@@ -723,6 +783,7 @@ function refreshButtons() {
   dom.btnDraw.disabled = !hasSim;
   dom.btnWholeRain.disabled = !hasSim;
   dom.btnClearRegions.disabled = !(regionEditor && regionEditor.allRegions().length > 0);
+  if (dom.btnReset) dom.btnReset.disabled = !hasSim;
 }
 
 let gui;
@@ -814,7 +875,7 @@ function buildGui() {
     });
   fRain
     .add(options, "rainIntensity", 0.0001, 0.003, 0.0001)
-    .name("降雨强度(0.0004≈60秒灌满)")
+    .name("降雨强度(默认0.0004)")
     .onChange(refreshRainSummary);
   fRain.add(options, "wholeAreaRain").name("全域降雨").onChange((v) => {
     dom.btnWholeRain.classList.toggle("danger-active", v);
@@ -825,6 +886,10 @@ function buildGui() {
     .add(rainProgress, "injected")
     .name("累计注入量")
     .listen();
+  const rainActions = {
+    "🧹 清空模拟状态(水量归零)": () => restartSimulation(),
+  };
+  fRain.add(rainActions, "🧹 清空模拟状态(水量归零)");
   fRain.open();
 
   regionGuiFolder = fRain; // 区域子文件夹挂到降雨控制下
@@ -1333,6 +1398,30 @@ window.__app = {
   },
   hasDomain() {
     return !!state.domain && state.domain.simPoly.length >= 3;
+  },
+  /** 区域面积（测试用）：模拟域 km² / 雨区 km² 列表 */
+  areas() {
+    return {
+      domainKm2: state.domain?.areaKm2 ?? 0,
+      rainKm2: regionEditor ? regionEditor.allRegions().map((r) => r.areaKm2 ?? 0) : [],
+      rainTotalKm2: regionEditor
+        ? regionEditor.getActiveRegions().reduce((s, r) => s + (r.areaKm2 || 0), 0)
+        : 0,
+    };
+  },
+  /** 领域实体标签文本（测试用）：模拟域 + 各雨区 */
+  areaLabels() {
+    const texts = [];
+    for (const e of viewer?.entities?.values ?? []) {
+      const t = e?.label?.text?.getValue?.(Cesium.JulianDate.now());
+      if (typeof t === "string" && /面积/.test(t)) texts.push(t);
+    }
+    return texts;
+  },
+  /** 清空模拟状态，从 0 重新开始（测试钩子，与工具栏按钮同一条路径） */
+  restartSimulation() {
+    restartSimulation();
+    return { hasFluid: !!fluid, injected: fluid ? fluid.getInjectedAmount() : -1 };
   },
   statusText() {
     return dom.statusBar?.innerText ?? "";

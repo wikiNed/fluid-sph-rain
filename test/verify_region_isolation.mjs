@@ -43,17 +43,21 @@ check("模拟域已用大框建立", domAfterBig.n >= 3, "vertices=" + domAfterB
 check("模拟已启动", domAfterBig.status.includes("模拟进行中"), domAfterBig.status);
 
 // 2) 画小框作为降雨区域
-// 注意：域提交后 index.js 会 camera.flyTo 到域中心（pitch -55），
-// 画面坐标已经变了，必须先重新设定相机，否则点击落点在域外。
+// 注意：域提交后 index.js 会 camera.flyTo 到域中心（pitch -55，duration 1.5s），
+// 画面坐标已经变了；若此时 setView 会被尚未结束的 flyTo 覆盖（实测会拍到高空斜视，
+// 点击落点跑到域外并报「请在模拟范围内部署降雨区域」）。
+// 因此必须先 cancelFlight() 停掉相机飞行，再 setView。
 await page.evaluate(() => {
+  const v = window.__app.viewer;
+  v.camera.cancelFlight();
   const e = window.__app.domain.extent;
   const lon = (e[0] + e[2]) / 2, lat = (e[1] + e[3]) / 2;
-  window.__app.viewer.camera.setView({
+  v.camera.setView({
     destination: Cesium.Cartesian3.fromDegrees(lon, lat, 5000),
     orientation: { heading: 0, pitch: Cesium.Math.toRadians(-89), roll: 0 },
   });
 });
-await new Promise((r) => setTimeout(r, 3000));
+await new Promise((r) => setTimeout(r, 1500));
 console.log("→ 点击「绘制降雨区域」并在框内画雨区（小框）…");
 await page.click("#btnDraw");
 await new Promise((r) => setTimeout(r, 400));

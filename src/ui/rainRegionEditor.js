@@ -1,6 +1,7 @@
 const Cesium = globalThis.Cesium;
 
 import { pointInPolygon } from "../sim/domainMask.js";
+import { areaLabel, polygonAreaKm2 } from "../sim/geoUtils.js";
 
 /** 区域边界配色轮换 */
 const PALETTE = [
@@ -275,7 +276,8 @@ export class RainRegionEditor {
         disableDepthTestDistance: Number.POSITIVE_INFINITY,
         verticalOrigin: Cesium.VerticalOrigin.CENTER,
         heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-        pixelOffset: new Cesium.Cartesian2(0, -14),
+        // 下移：模拟域面积标签在重心上方，雨区标签放下方避免重叠
+        pixelOffset: new Cesium.Cartesian2(0, 26),
       },
     });
 
@@ -286,12 +288,15 @@ export class RainRegionEditor {
       simPoly,
       intensity: 1.0,
       enabled: true,
+      areaKm2: polygonAreaKm2(cartos), // 雨区覆盖面积（球面多边形公式）
       _entities: [fillEntity, lineEntity, labelEntity],
     };
     this.regions.set(id, region);
     this._refreshLabelText(region);
     this._notifyChanged();
-    this._status(`✅ ${label} 已加入（顶点 ${simPoly.length}）`);
+    this._status(
+      `✅ ${label} 已加入（顶点 ${simPoly.length} · 面积 ${areaLabel(region.areaKm2)}）`,
+    );
   }
 
   _withinExtent(carto, extent) {
@@ -357,7 +362,9 @@ export class RainRegionEditor {
   _refreshLabelText(region) {
     const labelEntity = region._entities[2];
     if (labelEntity?.label) {
-      labelEntity.label.text = `${region.label}\n强度 ×${region.intensity.toFixed(1)}${
+      const area =
+        region.areaKm2 > 0 ? `\n面积 ${areaLabel(region.areaKm2)}` : "";
+      labelEntity.label.text = `${region.label}\n强度 ×${region.intensity.toFixed(1)}${area}${
         region.enabled ? "" : "（停用）"
       }`;
     }
