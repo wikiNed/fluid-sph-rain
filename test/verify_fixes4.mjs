@@ -90,6 +90,20 @@ async function main() {
           }
           return +((100 * n) / (a.w * a.h)).toFixed(2);
         },
+        diffLow(a, b) {
+          // 弱透明度下水色变化很淡，用 6 级阈值统计“有变化”的像素占比
+          let n = 0;
+          const len = Math.min(a.buf.length, b.buf.length);
+          for (let i = 0; i < len; i += 4) {
+            if (
+              Math.abs(a.buf[i] - b.buf[i]) > 6 ||
+              Math.abs(a.buf[i + 1] - b.buf[i + 1]) > 6 ||
+              Math.abs(a.buf[i + 2] - b.buf[i + 2]) > 6
+            )
+              n++;
+          }
+          return +((100 * n) / (a.w * a.h)).toFixed(2);
+        },
       };
     });
 
@@ -161,7 +175,7 @@ async function main() {
     check("第二场下满 200mm", Math.abs(e2.stats.injectedMm - 200) <= 2, `mm=${e2.stats.injectedMm.toFixed(2)}`);
     check("累计降雨量 ≈ 300mm（100 + 200）", Math.abs(e2.stats.totalMm - 300) <= 4, `total=${e2.stats.totalMm.toFixed(2)}`);
 
-    /* ---------- D. 水透明度 = 0 时水体完全不可见 ---------- */
+    /* ---------- D. 水透明度语义：0=完全不透明，1=最透明(alpha 0.2) ---------- */
     // 先停雨 + 关雨滴 + 冻结 SPH 计算 pass：否则水面持续演化，两次抓帧会
     // 因为水在流动而产生假差分（这也是前面 2% 误报的来源）。
     await page.evaluate(() => {
@@ -171,37 +185,51 @@ async function main() {
       for (let i = 0; i < 4; i++) if (stages[i]) stages[i].show = false;
     });
     await sleep(1500);
-    // 抬高机位，让水体进入画面
+    // 用当前模拟域的中心定位机位（夹具 DEM 是北京的，不能用固定经纬度），
+    // 从域南侧低空朝北俯视，保证水体在画面中。
     await page.evaluate(() => {
       const cam = window.__app.viewer.camera;
       cam.cancelFlight();
+      const ext = window.__app.precisionInfo().extent;
+      const lon = (ext[0] + ext[2]) / 2;
+      const lat = (ext[1] + ext[3]) / 2;
+      const spanLat = ext[3] - ext[1];
       cam.setView({
-        destination: Cesium.Cartesian3.fromDegrees(103.6, 30.6995, 850),
-        orientation: { heading: 0, pitch: Cesium.Math.toRadians(-35), roll: 0 },
+        destination: Cesium.Cartesian3.fromDegrees(lon, lat - spanLat * 1.1, 700),
+        orientation: { heading: 0, pitch: Cesium.Math.toRadians(-32), roll: 0 },
       });
     });
-    await sleep(1500);
-    const frameAlpha1 = await page.evaluate(() => window.__probe.snap());
-    await page.evaluate(() => {
-      window.__app.options.waterAlpha = 0;
-    });
-    await sleep(600);
-    const frameAlpha0 = await page.evaluate(() => window.__probe.snap());
-    const diffAlpha = await page.evaluate((a, b) => window.__probe.diff(a, b), frameAlpha1, frameAlpha0);
-    check("透明度 1→0 画面确实变化（水本来就可见）", diffAlpha > 0.8, `diffPct=${diffAlpha}`);
+    await sleep(1800);
 
-    const frameStageOff = await page.evaluate(async () => {
+    // 滑块 = 0 → 完全不透明
+    await page.evaluate(() => { window.__app.options.waterAlpha = 0; });
+    await sleep(400);
+    check("默认/设置为 0 时 waterAlpha=0（不透明档）", (await page.evaluate(() => window.__app.options.waterAlpha)) === 0);
+    const frameOpaque = await page.evaluate(() => window.__probe.snap());
+
+    // 滑块 = 1 → 最透明（alpha 0.2）
+    await page.evaluate(() => { window.__app.options.waterAlpha = 1; });
+    await sleep(400);
+    const frameClear = await page.evaluate(() => window.__probe.snap());
+    const diffOpaqueClear = await page.evaluate((a, b) => window.__probe.diff(a, b), frameOpaque, frameClear);
+    check("滑块 0(不透明) → 1(最透明) 画面确实变化", diffOpaqueClear > 0.8, `diffPct=${diffOpaqueClear}`);
+
+    // 关掉体积阶段作为“完全没有水”的参照
+    const frameNoWater = await page.evaluate(async () => {
       window.__app.fluid._stages[4].show = false;
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       return window.__probe.snap();
     });
-    const diffHidden = await page.evaluate((a, b) => window.__probe.diff(a, b), frameAlpha0, frameStageOff);
-    check("透明度=0 的画面 ≈ 不画水的画面（水体彻底不可见）", diffHidden < 0.8, `diffPct=${diffHidden}`);
+    const dOpaque = await page.evaluate((a, b) => window.__probe.diff(a, b), frameOpaque, frameNoWater);
+    const dClear = await page.evaluate((a, b) => window.__probe.diff(a, b), frameClear, frameNoWater);
+    const dClearLow = await page.evaluate((a, b) => window.__probe.diffLow(a, b), frameClear, frameNoWater);
+    check("不透明档的水体覆盖明显多于最透明档（0 更“实”）", dOpaque > 1.0 && dOpaque > dClear * 1.2, `不透明=${dOpaque} 最透明=${dClear}`);
+    check("最透明档仍能看出水体（低阈值差分 > 0）", dClearLow > 0.2, `diffPct(低阈值)=${dClearLow}`);
     await page.evaluate(() => {
       const stages = window.__app.fluid?._stages ?? [];
       for (let i = 0; i < 4; i++) if (stages[i]) stages[i].show = true;
       window.__app.fluid._stages[4].show = true;
-      window.__app.options.waterAlpha = 1;
+      window.__app.options.waterAlpha = 0.2;
     });
 
     /* ---------- E. 无致命错误 ---------- */
@@ -214,11 +242,15 @@ async function main() {
     try {
       await page.close();
     } catch {}
+    try {
+      browser.disconnect();
+    } catch {}
   }
 
   const pass = results.filter((r) => r.ok).length;
   console.log(`\n结果：${pass} 项通过，${results.length - pass} 项失败`);
-  if (pass !== results.length) process.exitCode = 1;
+  // 连到外部 Chrome 的 CDP 连接不会自动释放事件循环，显式退出避免脚本挂起
+  process.exit(pass === results.length ? 0 : 1);
 }
 
 main().catch((e) => {

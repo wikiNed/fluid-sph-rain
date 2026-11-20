@@ -148,7 +148,9 @@ const options = {
   depth: 180,
   shallow: Cesium.Color.fromCssColorString(colorOptions.shallowColor),
   deep: Cesium.Color.fromCssColorString(colorOptions.deepColor),
-  waterAlpha: 0.85,
+  // 水透明度滑块：0 = 完全不透明（alpha 1.0），1 = 最透明（alpha 0.2）。
+  // 默认 0.2 对应 alpha≈0.84，与早期固定 0.85 的观感一致。
+  waterAlpha: 0.2,
 
   // —— 新增：数据放置 ——
   placementWidthKm: 10.0, // 无地理参考图片的手动放置宽度
@@ -1491,7 +1493,10 @@ function buildGui() {
   fSim.add(options, "gravity", 1.0, 10.0).name("重力强度");
   fSim.add(options, "initialWaterLevel", 0, 1).name("初始水位");
   fSim.add(options, "depth", 50, 500).name("渲染质量");
-  fSim.add(options, "waterAlpha", 0, 1.0).name("水透明度");
+  const cWaterAlpha = fSim
+    .add(options, "waterAlpha", 0, 1.0)
+    .name("水透明度(0=不透明 1=最透)");
+  cWaterAlpha.domElement.parentElement.title = "0：完全不透明（alpha 1.0）；1：最透明（alpha 0.2）";
 
   /* ---- 5 档水深配色 ---- */
   const fDepth = fSim.addFolder("5档水深配色");

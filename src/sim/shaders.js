@@ -524,12 +524,13 @@ vec4 Render(in vec3 ro, in vec3 rd) {
             tc = mix(waterColor * underwaterColor, skyColor, F * 0.5);
             tc += spec * vec3(1.0) * 0.8;
 
-            // 透明度：完全由 GUI「水透明度」控制（0 = 完全不可见）。
-            // 不能用 mix(0.3, waterAlpha, ...)：那样滑块拉到 0 仍有 0.3 的底噪，
-            // 看起来“透明但还在”。Fresnel/高光也按 waterAlpha 缩放，否则 0 透明度下
-            // 高光仍会在水面上画出一层亮膜。
-            alpha = waterAlpha * smoothstep(0.0, 0.05, waterDepth);
-            alpha = clamp(alpha + waterAlpha * (F * 0.3 + spec * 0.5), 0.0, 1.0);
+            // 透明度：GUI「水透明度」滑块 0 → 完全不透明（alpha=1），
+            // 1 → 最透明（alpha=0.2），中间线性插值。
+            // Fresnel/高光也用同一个 waterOpacity 缩放，避免“不透明”时反而漏光、
+            // 或“最透明”时高光仍在水面上留一层亮膜。
+            float waterOpacity = mix(1.0, 0.2, clamp(waterAlpha, 0.0, 1.0));
+            alpha = waterOpacity * smoothstep(0.0, 0.05, waterDepth);
+            alpha = clamp(alpha + waterOpacity * (F * 0.3 + spec * 0.5), 0.0, 1.0);
         }
     }
 
