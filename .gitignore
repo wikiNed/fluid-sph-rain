@@ -47,3 +47,4 @@ test/_fixes*.log
 test/_served_check.mjs
 test/rain_amount_*.png
 test/_*.log
+test/alpha_case_*.png
