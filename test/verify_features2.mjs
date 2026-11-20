@@ -74,9 +74,15 @@ check("重新开启「道路网」后 show=true", ref2.layers.find((l) => l.key 
 /* ---------- 2. 5 档水深配色配置 + 图例 ---------- */
 const dc = await page.evaluate(() => window.__app.depthConfig());
 check("水深分档着色默认开启", dc.enabled === true);
-check("4 个分界值默认 [2,5,10,20]", JSON.stringify(dc.bands) === JSON.stringify([2, 5, 10, 20]), JSON.stringify(dc.bands));
+check(
+  "4 个分界值按体积盒跨度自动缩放（2%/5%/10%/20%）",
+  Array.isArray(dc.bands) &&
+    dc.bands.length === 4 &&
+    dc.bands.every((b, i) => Math.abs(b - Math.max(0.5, +(dc.bandFracs[i] * dc.boxThicknessM).toFixed(1))) < 0.11),
+  `bands=${JSON.stringify(dc.bands)} box=${dc.boxThicknessM}`,
+);
 check("5 档颜色已定义", Array.isArray(dc.colors) && dc.colors.length === 5, JSON.stringify(dc.colors));
-check("满档水深标定值 depthFullM=40", dc.fullM === 40, `fullM=${dc.fullM}`);
+check("雨量换算标定值 depthFullM=40", dc.fullM === 40, `fullM=${dc.fullM}`);
 check("图例可见且 5 行", dc.legendVisible === true && dc.legendRows === 5, `visible=${dc.legendVisible} rows=${dc.legendRows}`);
 
 const legend = await page.evaluate(() => {
@@ -89,13 +95,14 @@ const legend = await page.evaluate(() => {
   return { display: getComputedStyle(el).display, rows, title: el.querySelector(".dl-title")?.textContent?.trim() };
 });
 check("左下角图例 DOM 已显示", legend && legend.display !== "none", legend ? `display=${legend.display}` : "missing");
+const fmtM = (v) => (Math.abs(v - Math.round(v)) < 0.01 ? String(Math.round(v)) : String(+v.toFixed(1)));
+const expTexts = (() => {
+  const b = [0, ...dc.bands];
+  return [0, 1, 2, 3, 4].map((i) => (i === 4 ? `> ${fmtM(b[4])} m` : `${fmtM(b[i])} – ${fmtM(b[i + 1])} m`));
+})();
 check(
-  "图例 5 行文案为 0–2 / 2–5 / 5–10 / 10–20 / >20 m",
-  legend &&
-    legend.rows.length === 5 &&
-    legend.rows[0].text === "0 – 2 m" &&
-    legend.rows[3].text === "10 – 20 m" &&
-    legend.rows[4].text === "> 20 m",
+  `图例 5 行文案随盒跨度动态生成（${expTexts.join(" | ")}）`,
+  legend && legend.rows.length === 5 && expTexts.every((t, i) => legend.rows[i].text === t),
   legend ? legend.rows.map((r) => r.text).join(" | ") : "missing",
 );
 check(
@@ -123,6 +130,8 @@ await page.evaluate(async () =>
 );
 await page.waitForFunction(() => !!window.__app?.fluid, { timeout: 90000 });
 check("截图/测试用模拟域已建立", await page.evaluate(() => window.__app.hasDomain()));
+// 建域后体积盒跨度变了，重新取一次动态分档与盒跨度
+const dcAfterDomain = await page.evaluate(() => window.__app.depthConfig());
 
 // 分档着色开关 → volume stage uniform 与图例联动（需在流体管线建立后）
 const gfx = () =>
@@ -145,7 +154,7 @@ const gBack = await gfx();
 check("分档着色开启 → uniform=1", gOn.uniform === 1, JSON.stringify(gOn));
 check("关闭分档着色 → uniform=0 且图例隐藏", gOff.uniform === 0 && gOff.legend === "none", JSON.stringify(gOff));
 check("恢复后 uniform=1 且图例重新显示", gBack.uniform === 1 && gBack.legend === "block", JSON.stringify(gBack));
-check("depthRangeM uniform = depthFullM(40)", gOn.range === 40, `range=${gOn.range}`);
+check("depthRangeM uniform = 体积盒真实跨度（与几何同一把尺子）", gOn.range === dcAfterDomain.boxThicknessM, `range=${gOn.range} box=${dcAfterDomain.boxThicknessM}`);
 
 await page.evaluate(() =>
   window.__app.commitRegionUV([

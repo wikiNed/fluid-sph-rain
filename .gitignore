@@ -43,3 +43,7 @@ test/case_*.png
 test/cases_*.png
 test/case_time_diag.png
 test/_served_index.mjs
+test/_fixes*.log
+test/_served_check.mjs
+test/rain_amount_*.png
+test/_*.log

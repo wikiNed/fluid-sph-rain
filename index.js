@@ -90,8 +90,32 @@ const depthColorOptions = {
   c4: "#ff3b30", // > 20 m   红
 };
 
-/** 5 档水深的分界值（米），必须严格递增，GUI 修改时会自动修正顺序 */
-const depthBands = { b0: 2, b1: 5, b2: 10, b3: 20 };
+/**
+ * 5 档水深按「体积盒高度的百分比」分界（而不是固定米数）。
+ * 水深着色与水体几何高度必须用同一把尺子：着色器里 waterDepth 是占体积盒高度的
+ * 归一化比例，再乘以体积盒真实跨度得到米数，才能与眼睛里看到的水深一致。
+ * 取 0.2% / 0.5% / 1% / 2%：在常见的 1000 m 级山区体积盒上正好是 2/5/10/20 m
+ * （符合直觉的米制刻度），换到起伏 200 m 的小流域会自动缩到 0.5/1/2.4/4.7 m。
+ * 若用固定米数，山区积水几十米会一直停在第一、二档，看起来“水很深、颜色却很浅”。
+ */
+const DEPTH_BAND_FRACS = [0.002, 0.005, 0.01, 0.02];
+
+/** 当前体积盒高程跨度（米），用于把水深比例换算成米 */
+function currentBoxThicknessM() {
+  const t = fluid?.volumeThickness?.();
+  if (Number.isFinite(t) && t > 0) return t;
+  const dem = state.currentDem;
+  if (dem && Number.isFinite(dem.maxElevation) && Number.isFinite(dem.minElevation)) {
+    return Math.max(1, dem.maxElevation - dem.minElevation);
+  }
+  return 1000;
+}
+
+/** 当前 5 档分界（米）：随体积盒高程跨度自动缩放 */
+function currentDepthBands() {
+  const thick = currentBoxThicknessM();
+  return DEPTH_BAND_FRACS.map((f) => Math.max(0.5, +(f * thick).toFixed(1)));
+}
 
 /** 传给着色器的 vec3 uniform（sRGB 原值，着色器里再 gammaCorrect） */
 const depthColorUniforms = {
@@ -823,6 +847,7 @@ function teardownSimulation(alsoClearEntities) {
   }
   state.uiEntities = [];
   rainProgress.injected = "0.000";
+  rainProgress.total = "0.0";
   state.extent = null;
   state.currentDem = null;
   state.domainMaskCanvas = null;
@@ -844,6 +869,7 @@ async function finishStart(dem, domainMaskCanvas) {
 
   fluid = new TerrainFluidSimulation(viewer, dem, options);
   fluid.setDomainMask(domainMaskCanvas, !!state.domain);
+  updateDepthLegend(); // 体积盒跨度建立后才能把 5 档分界换算成正确米数
 
   rebuildRegionGui();
   applyRainRegions(); // 应用已有雨区（清空后为无雨）
@@ -891,9 +917,12 @@ function restartSimulation() {
   fluid.destroy();
   fluid = null;
   rainProgress.injected = "0.000";
+  rainProgress.total = "0.0";
+  rainProgress.mm = "0.0";
 
   fluid = new TerrainFluidSimulation(viewer, dem, options);
   fluid.setDomainMask(state.domainMaskCanvas, !!state.domain);
+  updateDepthLegend();
   applyRainRegions(); // 雨区与降雨开关保持不变，重新开始累计
   refreshButtons();
 
@@ -1364,7 +1393,7 @@ let regionControllers = {}; // id -> {folder, ctrls}
 let rainGuiCtrls = null;
 /** 地形采样精度下拉框控制器（供测试钩子同步显示） */
 let sampleGridCtrl = null;
-const rainProgress = { injected: "0.000", mm: "—", rate: "—" };
+const rainProgress = { injected: "0.000", total: "0.0", mm: "—", rate: "—" };
 
 function buildGui() {
   gui = new dat.GUI({ width: 300 });
@@ -1462,15 +1491,7 @@ function buildGui() {
   fSim.add(options, "gravity", 1.0, 10.0).name("重力强度");
   fSim.add(options, "initialWaterLevel", 0, 1).name("初始水位");
   fSim.add(options, "depth", 50, 500).name("渲染质量");
-  fSim.add(options, "waterAlpha", 0.1, 1.0).name("水透明度");
-  fSim
-    .addColor(colorOptions, "shallowColor")
-    .name("浅水颜色")
-    .onChange((v) => (options.shallow = Cesium.Color.fromCssColorString(v)));
-  fSim
-    .addColor(colorOptions, "deepColor")
-    .name("深水颜色")
-    .onChange((v) => (options.deep = Cesium.Color.fromCssColorString(v)));
+  fSim.add(options, "waterAlpha", 0, 1.0).name("水透明度");
 
   /* ---- 5 档水深配色 ---- */
   const fDepth = fSim.addFolder("5档水深配色");
@@ -1493,24 +1514,6 @@ function buildGui() {
         updateDepthLegend();
       });
   });
-  [
-    ["b0", 0.5, 50, 0.5, "①/② 分界(米)"],
-    ["b1", 1, 100, 0.5, "②/③ 分界(米)"],
-    ["b2", 1, 200, 0.5, "③/④ 分界(米)"],
-    ["b3", 1, 500, 0.5, "④/⑤ 分界(米)"],
-  ].forEach(([k, min, max, step, name]) => {
-    fDepth
-      .add(depthBands, k, min, max, step)
-      .name(name)
-      .onChange(() => {
-        normalizeDepthBands();
-        updateDepthLegend();
-      });
-  });
-  fDepth
-    .add(options, "depthFullM", 5, 200, 1)
-    .name("满档水深(米)")
-    .onChange(() => updateDepthLegend());
   fDepth.close();
   fSim.close();
 
@@ -1528,6 +1531,12 @@ function buildGui() {
     .add(options, "rainIntensity", 0.0001, 0.003, 0.0001)
     .name("降雨强度(默认0.0004)")
     .onChange(refreshRainSummary);
+  // 雨量→质量的换算标定：决定“1 mm 雨量注入多少 SPH 质量”，
+  // 与水深配色无关（配色已改为按体积盒高度比例自动分档，见 DEPTH_BAND_FRACS）。
+  const cCalib = fRain
+    .add(options, "depthFullM", 5, 200, 1)
+    .name("雨量换算标定(米)")
+    .onChange(() => refreshRainSummary());
   const cAmount = fRain
     .add(options, "rainAmountMm", 1, 1000, 1)
     .name("累计雨量(mm)")
@@ -1584,10 +1593,14 @@ function buildGui() {
     applyRainRegions();
     refreshRainSummary();
   });
-  fRain
-    .add(rainProgress, "injected")
-    .name("累计注入量")
+  const cRainTotal = fRain
+    .add(rainProgress, "total")
+    .name("累计降雨量(mm)")
     .listen();
+  if (cRainTotal?.domElement?.parentElement) {
+    cRainTotal.domElement.parentElement.title =
+      "跨多场降雨累加，只有「🧹 重置模拟」才会归零";
+  }
   const cRainMm = fRain
     .add(rainProgress, "mm")
     .name("已降雨量(mm)")
@@ -1653,17 +1666,6 @@ function resetRainfallEvent() {
   rainGuiCtrls?.rate?.updateDisplay?.();
 }
 
-/** 保证 5 档分界值严格递增（GUI 拖动越界时自动排序修正） */
-function normalizeDepthBands() {
-  const vals = [depthBands.b0, depthBands.b1, depthBands.b2, depthBands.b3]
-    .map((v) => Math.max(0.5, Number(v) || 0.5))
-    .sort((a, b) => a - b);
-  depthBands.b0 = vals[0];
-  depthBands.b1 = vals[1];
-  depthBands.b2 = vals[2];
-  depthBands.b3 = vals[3];
-}
-
 /** 同步左下角 5 档水深图例（颜色 / 分界 / 显隐） */
 function updateDepthLegend() {
   const el = dom.depthLegend;
@@ -1678,7 +1680,7 @@ function updateDepthLegend() {
     depthColorOptions.c3,
     depthColorOptions.c4,
   ];
-  const bands = [0, depthBands.b0, depthBands.b1, depthBands.b2, depthBands.b3];
+  const bands = [0, ...currentDepthBands()];
   const fmt = (v) =>
     Math.abs(v - Math.round(v)) < 0.01
       ? String(Math.round(v))
@@ -1790,6 +1792,9 @@ class TerrainFluidSimulation {
     this._rainAmountInjected = 0;
     this._rainAmountElapsed = 0;
     this._rainAmountLastTick = 0;
+    // 累计降雨量（mm）：跨多场降雨累加，只有重建模拟/重置模拟才归零；
+    // 与 _rainAmountInjected（本场次）区分开，满足“模拟多段降雨”的统计需求。
+    this._rainTotalMm = 0;
     this._postRenderCb = () => {
       this._frame += 1;
       this._updateRainInjection();
@@ -1798,9 +1803,12 @@ class TerrainFluidSimulation {
         const massPerMm = rainMassPerMm();
         rainProgress.mm = (this._rainAmountInjected / massPerMm).toFixed(1);
         rainProgress.rate = rainAmountRateMmH().toFixed(0);
+        rainProgress.total = this._rainTotalMm.toFixed(1);
       } else {
         rainProgress.mm = "—";
         rainProgress.rate = "—";
+        // 强度模式没有“累计毫米”的物理含义（质量换算标定只对雨量模式成立）
+        rainProgress.total = "—";
       }
     };
     this._viewer.scene.postRender.addEventListener(this._postRenderCb);
@@ -1872,6 +1880,7 @@ class TerrainFluidSimulation {
     const perPass = Math.min(remainingMass, (remainingMass / remainingTime) * dt) / 2;
     this._rainPassInjection = Math.max(0, perPass);
     this._rainAmountInjected += this._rainPassInjection * 2;
+    this._rainTotalMm += (this._rainPassInjection * 2) / massPerMm;
     this._rainAmountElapsed += dt;
     this._injectedSum += this._rainPassInjection * 2;
   }
@@ -1901,6 +1910,7 @@ class TerrainFluidSimulation {
       injectedMm: massPerMm > 0 ? this._rainAmountInjected / massPerMm : 0,
       elapsedSec: this._rainAmountElapsed,
       passInjection: this._rainPassInjection,
+      totalMm: this._rainTotalMm,
     };
   }
 
@@ -2167,20 +2177,21 @@ class TerrainFluidSimulation {
         deep: () => settings.deep,
         waterAlpha: () => settings.waterAlpha,
         // —— 5 档水深配色 ——
-        // 颜色 uniform 是 sRGB 原值（着色器内 czm_gammaCorrect 转线性）；
-        // depthRangeM 是「满档水深（米）」标定值：waterDepth(0~1) × 它 = 图例米数。
-        // 不能用体积盒真实跨度（=高程差，常见上千公里级），否则默认雨强下
-        // 几秒内就全部落进 >20m 红色档，五档配色完全失去区分度（见 §5.10）。
+        // 颜色 uniform 是 sRGB 原值（着色器内 czm_gammaCorrect 转线性）。
+        // 分档与米制换算都跟随体积盒高程跨度（DEPTH_BAND_FRACS × 跨度），
+        // 与水面几何高度同一把尺子，避免“水很深、颜色却很浅”（§5.11）。
         depthColor0: () => depthColorUniforms.c0,
         depthColor1: () => depthColorUniforms.c1,
         depthColor2: () => depthColorUniforms.c2,
         depthColor3: () => depthColorUniforms.c3,
         depthColor4: () => depthColorUniforms.c4,
-        depthBand0: () => depthBands.b0,
-        depthBand1: () => depthBands.b1,
-        depthBand2: () => depthBands.b2,
-        depthBand3: () => depthBands.b3,
-        depthRangeM: () => Math.max(1, settings.depthFullM),
+        depthBand0: () => currentDepthBands()[0],
+        depthBand1: () => currentDepthBands()[1],
+        depthBand2: () => currentDepthBands()[2],
+        depthBand3: () => currentDepthBands()[3],
+        // 水深米数 = 归一化水深 × 体积盒真实跨度，与水体几何高度同一尺度；
+        // 这样“看到多深”和“图例标多少米”一致。
+        depthRangeM: () => Math.max(1, currentBoxThicknessM()),
         depthColorEnabled: () => (settings.depthColorEnabled ? 1.0 : 0.0),
       },
       geometry,
@@ -2374,11 +2385,14 @@ window.__app = {
     state.rainFx?.setEnabled?.(options.rainFx);
     return this.rainFxInfo();
   },
-  /** 5 档水深配色状态（测试用）：bands/colors 按档位顺序返回数组 */
+  /** 5 档水深配色状态（测试用）：bands/colors 按档位顺序返回数组（bands 随体积盒跨度自动缩放） */
   depthConfig() {
+    const bands = currentDepthBands();
     return {
       enabled: !!options.depthColorEnabled,
-      bands: [depthBands.b0, depthBands.b1, depthBands.b2, depthBands.b3],
+      bands,
+      bandFracs: [...DEPTH_BAND_FRACS],
+      boxThicknessM: currentBoxThicknessM(),
       colors: [
         depthColorOptions.c0,
         depthColorOptions.c1,
@@ -2397,7 +2411,6 @@ window.__app = {
   },
   /** 测试钩子：外部直接改 options/颜色后，手动同步 uniform 与图例（等价 GUI onChange） */
   syncDepthColors() {
-    normalizeDepthBands();
     syncDepthColorUniforms();
     updateDepthLegend();
     return this.depthConfig();

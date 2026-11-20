@@ -95,7 +95,9 @@ const statsExpr = () => {
   });
   const px = ctx.readPixels({ framebuffer: fb, x: 0, y: 0, width: tex.width, height: tex.height });
   fb.destroy();
-  const fullM = app.options.depthFullM;
+  const dc = app.depthConfig();
+  const boxM = dc.boxThicknessM; // 与几何高度同一把尺子
+  const bandsM = dc.bands; // [b1,b2,b3,b4]
   const bands = [0, 0, 0, 0, 0];
   let wet = 0, sumFrac = 0, maxFrac = 0;
   const n = tex.width * tex.height;
@@ -105,18 +107,18 @@ const statsExpr = () => {
       wet++;
       sumFrac += frac;
       if (frac > maxFrac) maxFrac = frac;
-      const d = frac * fullM;
-      if (d < 2) bands[0]++;
-      else if (d < 5) bands[1]++;
-      else if (d < 10) bands[2]++;
-      else if (d < 20) bands[3]++;
+      const d = frac * boxM;
+      if (d < bandsM[0]) bands[0]++;
+      else if (d < bandsM[1]) bands[1]++;
+      else if (d < bandsM[2]) bands[2]++;
+      else if (d < bandsM[3]) bands[3]++;
       else bands[4]++;
     }
   }
   return {
     wetPct: +((wet / n) * 100).toFixed(1),
-    meanM: wet ? +((sumFrac / wet) * fullM).toFixed(2) : 0,
-    maxM: +(maxFrac * fullM).toFixed(1),
+    meanM: wet ? +((sumFrac / wet) * boxM).toFixed(2) : 0,
+    maxM: +(maxFrac * boxM).toFixed(1),
     bandPct: bands.map((v) => +((v / Math.max(wet, 1)) * 100).toFixed(1)),
     stats: app.rainfallConfig().stats,
     fx: app.rainFxInfo(),
