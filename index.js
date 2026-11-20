@@ -131,6 +131,13 @@ const options = {
   // —— 新增：降雨控制 ——
   rainEnabled: false, // 降雨总开关
   rainIntensity: 0.0004, // 全局降雨强度（每子步每格注入质量；每秒注入 = 120 × 该值）
+  // 降雨驱动模式：
+  //   "intensity" = 强度模式（沿用原版：按雨强连续注入，雨不停水不停）
+  //   "amount"    = 雨量模式（按「累计降雨量(mm) + 降雨历时(秒)」注入，
+  //                 注满该场次总雨量后自动停止，可模拟 1mm~1000mm 的一场雨）
+  rainMode: "intensity",
+  rainAmountMm: 50, // 雨量模式：本场累计降雨量（毫米），范围 1~1000
+  rainDurationSec: 120, // 雨量模式：降雨历时（秒，模拟时间），决定注入速率
   wholeAreaRain: false, // 是否全域降雨（不勾选则仅在雨区内）
   pointSource: false, // 点击点源注水（原版交互）
 
@@ -328,11 +335,46 @@ function syncZhLayers() {
   }
 }
 
+/**
+ * 雨量模式的核心换算：把「累计降雨量(mm)」换算成每个格子需要注入的 SPH 质量。
+ *
+ * 推导（体积守恒，以 5 档图例的「米」为准）：
+ *   - 着色器里 waterDepth（占体积盒高度的归一化比例）= data.x * heightScale(0.25)，
+ *     图例米数 = waterDepth × depthFullM，即 1 个质量单位 ≈ 0.25×depthFullM 米。
+ *   - 若想让图例米数等于真实的等效降雨深度（1mm → 0.001m），则每格目标质量
+ *     data.x = P米 / (0.25 × depthFullM) = P毫米 / (250 × depthFullM)。
+ *   - 于是「图例水深 × 面积」= 降雨量 × 雨区面积，即画面上的水量与真实降雨体积一致；
+ *     而地形上水柱的几何高度仍是放大显示（放大倍数 = 体积盒高程跨度 / depthFullM，
+ *     默认约 50×），这是为了让人眼在高差上千米的地形上看清米级积水（见 §5.13）。
+ *
+ * @returns {number} 每 1mm 累计降雨量对应的每格质量增量
+ */
+function rainMassPerMm() {
+  const fullM = Math.max(1, Number(options.depthFullM) || 40);
+  return 1 / (250 * fullM);
+}
+
+/** 雨量模式：累计雨量 / 降雨历时 → 等效雨强（mm/h），用于雨丝密度与读数 */
+function rainAmountRateMmH() {
+  const mm = Math.max(0, Number(options.rainAmountMm) || 0);
+  const dur = Math.max(1, Number(options.rainDurationSec) || 1);
+  return (mm / dur) * 3600;
+}
+
 /** 当前雨量强度 → 0~1.25 的雨丝密度（雨强越大雨丝越密） */
 function rainFxAmount() {
   if (!options.rainEnabled) return 0;
   const active = regionEditor ? regionEditor.getActiveRegions().length : 0;
   if (!options.wholeAreaRain && active === 0) return 0;
+  if (options.rainMode === "amount") {
+    // 等效雨强 10mm/h≈0.35 → 3000mm/h 以上≈1.25，按对数插值
+    const rate = Math.max(1, rainAmountRateMmH());
+    const k = Math.max(
+      0,
+      Math.min(1, Math.log(rate / 10) / Math.log(3000 / 10)),
+    );
+    return 0.35 + k * 0.9;
+  }
   const k = Number(options.rainIntensity) / 0.0004; // 默认雨强 = 1.0
   const base = Number.isFinite(k) ? 0.35 + k * 0.45 : 0.7;
   return Math.min(1.25, Math.max(0.35, base));
@@ -808,10 +850,14 @@ async function finishStart(dem, domainMaskCanvas) {
   const rainLabel = nRain
     ? `雨区数量：<strong>${nRain}</strong>（合计面积 ${areaLabel(rainArea)}）`
     : `雨区数量：<strong>0</strong>`;
+  const rainModeLabel =
+    options.rainMode === "amount"
+      ? `降雨：雨量模式 · 累计 <strong>${options.rainAmountMm} mm</strong> / 历时 ${options.rainDurationSec}s（≈${rainAmountRateMmH().toFixed(0)} mm/h，注满自动停）`
+      : `降雨：强度模式 · 雨强 ${options.rainIntensity}`;
   setStatus(
     `🌊 <strong>模拟进行中</strong><br>数据：${dem.sourceName} · ${dem.info}<br>` +
-      `范围：${extentAreaLabel(dem.extent)}<br>${domainLabel} · ${rainLabel}<br>` +
-      `提示：「🌧 绘制降雨区域」左键加点 / 右键结束（雨区须在橙色模拟域内）；GUI 中可开启全域降雨或调整强度；「🧹 重置模拟」可清空水量从 0 重跑。`,
+      `范围：${extentAreaLabel(dem.extent)}<br>${domainLabel} · ${rainLabel}<br>${rainModeLabel}<br>` +
+      `提示：「🌧 绘制降雨区域」左键加点 / 右键结束（雨区须在橙色模拟域内）；GUI 中可开启全域降雨或切换降雨模式；「🧹 重置模拟」可清空水量从 0 重跑。`,
   );
 }
 
@@ -937,6 +983,8 @@ function applyRainRegions() {
       ? rasterizeRainMask(active, whole)
       : null;
   fluid.setRainMask(canvas);
+  // 雨区/全域降雨变化后，雨量模式的「本场累计」从 0 重新开始（已注入的水量不撤销）
+  if (options.rainMode === "amount") resetRainfallEvent();
 }
 
 function toggleWholeRain(on) {
@@ -1031,7 +1079,9 @@ function refreshButtons() {
 let gui;
 let regionGuiFolder;
 let regionControllers = {}; // id -> {folder, ctrls}
-const rainProgress = { injected: "0.000" };
+/** 降雨模式相关的 GUI 控制器（用于按模式显示/隐藏雨强与雨量控件） */
+let rainGuiCtrls = null;
+const rainProgress = { injected: "0.000", mm: "—", rate: "—" };
 
 function buildGui() {
   gui = new dat.GUI({ width: 300 });
@@ -1165,6 +1215,54 @@ function buildGui() {
 
   /* ---- 降雨控制 ---- */
   const fRain = gui.addFolder("降雨控制");
+  const cMode = fRain
+    .add(options, "rainMode", { 强度模式: "intensity", 雨量模式: "amount" })
+    .name("降雨模式")
+    .onChange(() => {
+      resetRainfallEvent();
+      syncRainModeGui();
+      refreshRainSummary();
+    });
+  const cIntensity = fRain
+    .add(options, "rainIntensity", 0.0001, 0.003, 0.0001)
+    .name("降雨强度(默认0.0004)")
+    .onChange(refreshRainSummary);
+  const cAmount = fRain
+    .add(options, "rainAmountMm", 1, 1000, 1)
+    .name("累计雨量(mm)")
+    .onChange(() => {
+      resetRainfallEvent();
+      syncRainModeGui();
+      refreshRainSummary();
+    });
+  const cDuration = fRain
+    .add(options, "rainDurationSec", 10, 600, 5)
+    .name("降雨历时(秒)")
+    .onChange(() => {
+      resetRainfallEvent();
+      refreshRainSummary();
+    });
+  // 雨量预设（依据 GB/T 28592 的 24h 降水量等级划分增强版，便于一键试算）
+  const rainPresets = {
+    "💧 1mm 微量": 1,
+    "🌦 10mm 小雨": 10,
+    "🌧 25mm 中雨": 25,
+    "🌧 50mm 大雨": 50,
+    "⛈ 100mm 暴雨": 100,
+    "⛈ 250mm 大暴雨": 250,
+    "🌊 500mm 特大暴雨": 500,
+    "🌊 1000mm 极端": 1000,
+  };
+  const cPreset = fRain
+    .add(options, "rainAmountMm", rainPresets)
+    .name("雨量预设")
+    .onChange((v) => {
+      options.rainAmountMm = Number(v);
+      if (cAmount) cAmount.updateDisplay();
+      resetRainfallEvent();
+      syncRainModeGui();
+      refreshRainSummary();
+    });
   fRain
     .add(options, "rainEnabled")
     .name("开始降雨")
@@ -1175,12 +1273,10 @@ function buildGui() {
           setStatus("⚠ 尚未划定降雨区域：先「🌧 绘制降雨区域」，或勾选「全域降雨」");
         }
       }
+      // 雨量模式：重新开启降雨视为新一场雨，累计归零（水面水量保留）
+      if (options.rainMode === "amount") resetRainfallEvent();
       refreshRainSummary();
     });
-  fRain
-    .add(options, "rainIntensity", 0.0001, 0.003, 0.0001)
-    .name("降雨强度(默认0.0004)")
-    .onChange(refreshRainSummary);
   fRain.add(options, "rainFx").name("雨滴下落效果");
   fRain.add(options, "wholeAreaRain").name("全域降雨").onChange((v) => {
     dom.btnWholeRain.classList.toggle("danger-active", v);
@@ -1191,13 +1287,64 @@ function buildGui() {
     .add(rainProgress, "injected")
     .name("累计注入量")
     .listen();
+  const cRainMm = fRain
+    .add(rainProgress, "mm")
+    .name("已降雨量(mm)")
+    .listen();
+  const cRainRate = fRain
+    .add(rainProgress, "rate")
+    .name("等效雨强(mm/h)")
+    .listen();
   const rainActions = {
     "🧹 清空模拟状态(水量归零)": () => restartSimulation(),
   };
   fRain.add(rainActions, "🧹 清空模拟状态(水量归零)");
   fRain.open();
 
+  rainGuiCtrls = {
+    mode: cMode,
+    intensity: cIntensity,
+    amount: cAmount,
+    duration: cDuration,
+    preset: cPreset,
+    mm: cRainMm,
+    rate: cRainRate,
+  };
+  syncRainModeGui();
+
   regionGuiFolder = fRain; // 区域子文件夹挂到降雨控制下
+}
+
+/** 按降雨模式显示/隐藏对应控件（强度模式隐藏雨量项，雨量模式隐藏雨强项） */
+function syncRainModeGui() {
+  if (!rainGuiCtrls) return;
+  const isAmount = options.rainMode === "amount";
+  const show = (c, visible) => {
+    if (!c || !c.domElement || !c.domElement.style) return;
+    c.domElement.style.display = visible ? "" : "none";
+  };
+  show(rainGuiCtrls.intensity, !isAmount);
+  show(rainGuiCtrls.amount, isAmount);
+  show(rainGuiCtrls.duration, isAmount);
+  show(rainGuiCtrls.preset, isAmount);
+  show(rainGuiCtrls.mm, isAmount);
+  show(rainGuiCtrls.rate, isAmount);
+  rainGuiCtrls.mm?.updateDisplay?.();
+  rainGuiCtrls.rate?.updateDisplay?.();
+}
+
+/** 重置本场降雨量的累计（切换雨量/历时/模式、或重新开始降雨时调用） */
+function resetRainfallEvent() {
+  if (fluid) fluid.resetRainAmount();
+  if (options.rainMode === "amount") {
+    rainProgress.mm = "0.0";
+    rainProgress.rate = rainAmountRateMmH().toFixed(0);
+  } else {
+    rainProgress.mm = "—";
+    rainProgress.rate = "—";
+  }
+  rainGuiCtrls?.mm?.updateDisplay?.();
+  rainGuiCtrls?.rate?.updateDisplay?.();
 }
 
 /** 保证 5 档分界值严格递增（GUI 拖动越界时自动排序修正） */
@@ -1250,6 +1397,13 @@ function refreshRainSummary() {
   if (options.rainEnabled) parts.push("🌧 降雨中");
   if (options.wholeAreaRain) parts.push("全域");
   parts.push(`${n} 个雨区`);
+  if (options.rainMode === "amount") {
+    parts.push(
+      `雨量 ${options.rainAmountMm}mm / ${options.rainDurationSec}s（≈${rainAmountRateMmH().toFixed(0)} mm/h）`,
+    );
+  } else {
+    parts.push(`雨强 ${options.rainIntensity}`);
+  }
   setStatus(`<strong>${parts.join(" · ")}</strong><br>${state.demInfo}`);
 }
 
@@ -1320,8 +1474,52 @@ class TerrainFluidSimulation {
     // 统计
     this._frame = 0;
     this._injectedSum = 0;
+    // —— 雨量模式（累计降雨量）状态 ——
+    // _rainPassInjection：本帧每个 Simulation pass 注入到掩膜格子的质量；
+    //   intensity 模式 = settings.rainIntensity，amount 模式 = 剩余雨量 / 剩余历时分摊。
+    // _rainAmountTotal：本场次目标总量（每格质量）；_rainAmountInjected：已注入（每格质量，
+    //   含同一帧的两个 Simulation pass）；_rainAmountElapsed：已降雨时长（秒）。
+    this._rainPassInjection = settings.rainIntensity;
+    this._rainAmountTotal = 0;
+    this._rainAmountInjected = 0;
+    this._rainAmountElapsed = 0;
+    this._rainAmountLastTick = 0;
     this._postRenderCb = () => {
       this._frame += 1;
+      this._updateRainInjection();
+      rainProgress.injected = this._injectedSum.toFixed(3);
+      if (settings.rainMode === "amount") {
+        const massPerMm = rainMassPerMm();
+        rainProgress.mm = (this._rainAmountInjected / massPerMm).toFixed(1);
+        rainProgress.rate = rainAmountRateMmH().toFixed(0);
+      } else {
+        rainProgress.mm = "—";
+        rainProgress.rate = "—";
+      }
+    };
+    this._viewer.scene.postRender.addEventListener(this._postRenderCb);
+
+    this._entities = [];
+    this._buildPipeline(heightMapSource);
+  }
+
+  /**
+   * 每帧（渲染完成后）计算下一帧要用的降雨注入量。
+   *
+   * 之所以放在 postRender 而不是渲染前：Cesium 先执行各 ComputeStage 的
+   * DrawCommand（着色器里读 rainIntensity uniform），之后才触发 postRender。
+   * 这里算出的值供「下一帧」使用，误差一帧可忽略。
+   *
+   * amount 模式按「剩余雨量 / 剩余历时」分摊到每个 pass（每帧有 2 个 Simulation
+   * pass 会注入，见 _buildPipeline：simulation + history），用真实时间间隔 dt 计算，
+   * 保证掉帧时总注入量仍然等于设定雨量。
+   */
+  _updateRainInjection() {
+    const settings = this._settings;
+    if (settings.rainMode !== "amount") {
+      this._rainPassInjection = settings.rainEnabled
+        ? settings.rainIntensity
+        : 0;
       if (
         settings.rainEnabled &&
         settings.rainIntensity > 0 &&
@@ -1329,12 +1527,75 @@ class TerrainFluidSimulation {
       ) {
         this._injectedSum += settings.rainIntensity;
       }
-      rainProgress.injected = this._injectedSum.toFixed(3);
-    };
-    this._viewer.scene.postRender.addEventListener(this._postRenderCb);
+      return;
+    }
 
-    this._entities = [];
-    this._buildPipeline(heightMapSource);
+    const hasMask =
+      this._rainMaskLive !== null || settings.wholeAreaRain === true;
+    const raining = !!settings.rainEnabled && hasMask;
+    const now = performance.now() / 1000;
+    if (!raining) {
+      // 关雨/无雨区时暂停计时，重新开启后从暂停处继续
+      this._rainAmountLastTick = 0;
+      this._rainPassInjection = 0;
+      return;
+    }
+
+    const massPerMm = rainMassPerMm();
+    this._rainAmountTotal =
+      Math.max(0, Number(settings.rainAmountMm) || 0) * massPerMm;
+    const duration = Math.max(1, Number(settings.rainDurationSec) || 1);
+
+    const dt =
+      this._rainAmountLastTick > 0
+        ? Math.min(Math.max(now - this._rainAmountLastTick, 0), 0.25)
+        : 0;
+    this._rainAmountLastTick = now;
+
+    const remainingMass = Math.max(
+      0,
+      this._rainAmountTotal - this._rainAmountInjected,
+    );
+    const remainingTime = Math.max(1e-3, duration - this._rainAmountElapsed);
+    if (remainingMass <= 0 || dt <= 0) {
+      this._rainPassInjection = 0;
+      return;
+    }
+
+    // 每帧目标 = 剩余量 × dt/剩余历时；每帧 2 个 pass，各注入一半
+    const perPass = Math.min(remainingMass, (remainingMass / remainingTime) * dt) / 2;
+    this._rainPassInjection = Math.max(0, perPass);
+    this._rainAmountInjected += this._rainPassInjection * 2;
+    this._rainAmountElapsed += dt;
+    this._injectedSum += this._rainPassInjection * 2;
+  }
+
+  /** 重置本场次降雨量累计（切换到新雨量/新雨区后从 0 开始累计，水面不解算） */
+  resetRainAmount() {
+    this._rainAmountInjected = 0;
+    this._rainAmountElapsed = 0;
+    this._rainAmountLastTick = 0;
+    this._rainPassInjection = 0;
+    this._rainAmountTotal = 0;
+    rainProgress.mm = "0.0";
+  }
+
+  /** 雨量模式统计（测试/状态栏读数用） */
+  getRainfallStats() {
+    const settings = this._settings;
+    const massPerMm = rainMassPerMm();
+    return {
+      mode: settings.rainMode,
+      targetMm: Math.max(0, Number(settings.rainAmountMm) || 0),
+      durationSec: Math.max(1, Number(settings.rainDurationSec) || 1),
+      rateMmH: rainAmountRateMmH(),
+      massPerMm,
+      targetMass: this._rainAmountTotal,
+      injectedMass: this._rainAmountInjected,
+      injectedMm: massPerMm > 0 ? this._rainAmountInjected / massPerMm : 0,
+      elapsedSec: this._rainAmountElapsed,
+      passInjection: this._rainPassInjection,
+    };
   }
 
   setWaterSource(position) {
@@ -1494,8 +1755,11 @@ class TerrainFluidSimulation {
       waterAddRate: () => (settings.pointSource ? settings.waterAddRate : 0.0),
       waterSourceRadius: () => settings.waterSourceRadius,
       gravity: () => settings.gravity,
+      // 降雨注入量由 _updateRainInjection() 每帧计算：
+      //   intensity 模式 = 固定雨强；amount 模式 = 按剩余雨量/剩余历时分摊。
+      // 该 uniform 每帧被 2 个 Simulation pass 各读取一次（simulation + history）。
       rainIntensity: () =>
-        settings.rainEnabled ? settings.rainIntensity : 0.0,
+        settings.rainEnabled ? this._rainPassInjection : 0.0,
       rainMask: () => this._rainMaskLive ?? this._rainEmptyTexture,
       domainMask: domainMaskUniform,
       domainEnabled: domainEnabledUniform,
@@ -1825,6 +2089,48 @@ window.__app = {
     syncDepthColorUniforms();
     updateDepthLegend();
     return this.depthConfig();
+  },
+  /** 降雨模式状态（测试用）：模式/设定雨量/历时/换算率；amount 模式下附带已注入雨量等统计 */
+  rainfallConfig() {
+    const cfg = {
+      mode: options.rainMode,
+      amountMm: options.rainAmountMm,
+      durationSec: options.rainDurationSec,
+      rateMmH: rainAmountRateMmH(),
+      massPerMm: rainMassPerMm(),
+      depthFullM: options.depthFullM,
+      intensity: options.rainIntensity,
+      rainEnabled: !!options.rainEnabled,
+      stats: fluid?.getRainfallStats?.() ?? null,
+    };
+    return cfg;
+  },
+  /** 测试钩子：设置降雨（模式/雨量/历时），并同步 GUI 与面板显示 */
+  setRainfall(mm, durationSec, mode = "amount") {
+    options.rainMode = mode === "intensity" ? "intensity" : "amount";
+    if (mm !== undefined) options.rainAmountMm = Math.min(1000, Math.max(1, Number(mm) || 0));
+    if (durationSec !== undefined) {
+      options.rainDurationSec = Math.min(600, Math.max(10, Number(durationSec) || 0));
+    }
+    if (fluid) fluid.resetRainAmount();
+    rainProgress.mm = "0.0";
+    rainProgress.rate = rainAmountRateMmH().toFixed(0);
+    syncRainModeGui();
+    refreshRainSummary();
+    return this.rainfallConfig();
+  },
+  /** 降雨模式 GUI 控件显隐状态（测试用）：雨量模式应隐藏雨强、显示雨量/历时/预设/读数 */
+  rainGuiState() {
+    if (!rainGuiCtrls) return null;
+    const vis = (c) => !!(c && c.domElement && c.domElement.style.display !== "none");
+    return {
+      intensity: vis(rainGuiCtrls.intensity),
+      amount: vis(rainGuiCtrls.amount),
+      duration: vis(rainGuiCtrls.duration),
+      preset: vis(rainGuiCtrls.preset),
+      mm: vis(rainGuiCtrls.mm),
+      rate: vis(rainGuiCtrls.rate),
+    };
   },
   /** 体积盒竖直跨度（米）：shader 里 waterDepth(0~1) × 该值 = 真实水深 */
   volumeThickness() {

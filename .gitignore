@@ -21,6 +21,7 @@ test/feat_*.png
 test/pool_*.png
 test/rd_*.png
 test/rain_*.png
+test/rainfall_*.png
 test/rainfx_*.png
 test/showcase_*.png
 test/diag_*.png
