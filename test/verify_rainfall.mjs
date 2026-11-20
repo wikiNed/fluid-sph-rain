@@ -49,6 +49,12 @@ async function main() {
     check("默认雨量 50mm / 历时 120s", cfg0.amountMm === 50 && cfg0.durationSec === 120);
     check("默认 massPerMm = 1e-4（depthFullM=40）", Math.abs(cfg0.massPerMm - 1e-4) < 1e-12, cfg0.massPerMm);
     check("默认等效雨强 1500 mm/h", Math.abs(cfg0.rateMmH - 1500) < 1e-6, cfg0.rateMmH);
+    const guiInit = await page.evaluate(() => window.__app.rainGuiState());
+    check(
+      "强度模式默认：显示雨强、隐藏雨量控件",
+      !!guiInit && guiInit.intensity === true && guiInit.amount === false && guiInit.preset === false,
+      JSON.stringify(guiInit),
+    );
 
     // 安装测试辅助
     await page.evaluate(() => {
@@ -135,6 +141,11 @@ async function main() {
       !!guiAmount && guiAmount.intensity === false && guiAmount.amount === true && guiAmount.duration === true && guiAmount.preset === true && guiAmount.mm === true,
       JSON.stringify(guiAmount),
     );
+    check(
+      "雨量模式：整行隐藏生效（面板比强度模式高，非留下空行）",
+      !!guiAmount && !!guiInit && guiAmount.folderHeight > guiInit.folderHeight,
+      `amount=${guiAmount?.folderHeight} intensity=${guiInit?.folderHeight}`,
+    );
 
     await page.evaluate(() => window.__probe.setRainEnabled(true));
     await sleep(1000);
@@ -193,6 +204,11 @@ async function main() {
       "强度模式：雨强滑杆恢复显示、雨量控件隐藏",
       !!guiIntensity && guiIntensity.intensity === true && guiIntensity.amount === false && guiIntensity.preset === false,
       JSON.stringify(guiIntensity),
+    );
+    check(
+      "强度模式：面板比雨量模式矮（雨量行整行隐藏）",
+      !!guiIntensity && !!guiAmount && guiIntensity.folderHeight < guiAmount.folderHeight,
+      `now=${guiIntensity?.folderHeight} amountMode=${guiAmount?.folderHeight}`,
     );
     await page.evaluate(() => window.__probe.setRainEnabled(true));
     await sleep(1200);

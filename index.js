@@ -1320,8 +1320,12 @@ function syncRainModeGui() {
   if (!rainGuiCtrls) return;
   const isAmount = options.rainMode === "amount";
   const show = (c, visible) => {
-    if (!c || !c.domElement || !c.domElement.style) return;
-    c.domElement.style.display = visible ? "" : "none";
+    const el = c?.domElement;
+    if (!el || !el.style) return;
+    // dat.GUI 的 controller.domElement 是控件容器（div.c），真正占一行的是外层 li.cr：
+    // 只隐藏 div.c 会把滑块藏掉但留下空行，所以必须沿 DOM 往上找 li.cr 整行隐藏。
+    const row = (el.closest && el.closest("li.cr")) || el;
+    row.style.display = visible ? "" : "none";
   };
   show(rainGuiCtrls.intensity, !isAmount);
   show(rainGuiCtrls.amount, isAmount);
@@ -2122,7 +2126,14 @@ window.__app = {
   /** 降雨模式 GUI 控件显隐状态（测试用）：雨量模式应隐藏雨强、显示雨量/历时/预设/读数 */
   rainGuiState() {
     if (!rainGuiCtrls) return null;
-    const vis = (c) => !!(c && c.domElement && c.domElement.style.display !== "none");
+    // 用整行 li.cr 的计算样式判断（dat.GUI 的 domElement 只是控件容器，不能代表整行是否可见）
+    const vis = (c) => {
+      const el = c?.domElement;
+      if (!el) return null;
+      const row = (el.closest && el.closest("li.cr")) || el;
+      const style = (row.ownerDocument || document).defaultView.getComputedStyle(row);
+      return style.display !== "none";
+    };
     return {
       intensity: vis(rainGuiCtrls.intensity),
       amount: vis(rainGuiCtrls.amount),
@@ -2130,6 +2141,16 @@ window.__app = {
       preset: vis(rainGuiCtrls.preset),
       mm: vis(rainGuiCtrls.mm),
       rate: vis(rainGuiCtrls.rate),
+      folderRows: (() => {
+        const folder = rainGuiCtrls.intensity?.domElement?.closest?.(".dg .folder");
+        if (!folder) return null;
+        return [...folder.querySelectorAll("li.cr")].length;
+      })(),
+      folderHeight: (() => {
+        const folder = rainGuiCtrls.intensity?.domElement?.closest?.(".dg .folder");
+        if (!folder) return null;
+        return Math.round(folder.getBoundingClientRect().height);
+      })(),
     };
   },
   /** 体积盒竖直跨度（米）：shader 里 waterDepth(0~1) × 该值 = 真实水深 */

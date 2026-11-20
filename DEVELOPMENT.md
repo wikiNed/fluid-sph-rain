@@ -419,7 +419,8 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 - **状态与重置**：`rainProgress = { injected, mm, rate }`；切换模式/雨量/历时、重开降雨、改动雨区或全域降雨时调用 `resetRainfallEvent()` 让"本场累计"从 0 开始（已注入的水量不撤销，仍会继续流动汇聚）；「🧹 重置模拟」则把水量与雨量累计一起归零。测试钩子：`__app.setRainfall(mm, durationSec, mode)`、`__app.rainfallConfig()`。
 - **实测（真 GPU :9223，夹具 DEM 盒厚 235m）**：100mm/10s 下完回读 `surfaceTexture`，湿格 63.8%、最大图例水深 0.57m；1000mm/10s 最大 1.95m；**两者水体总质量比 10.36 ≈ 10**，证明"设定雨量 → 注入量 → 落地水量"三者一致。真地形两雨区 500mm/60s 演示：湿格 15%、均值 0.19m、最大 1.8m，全部落在 0–2m 浅蓝档——真实 500mm 就是 0.5m 水深，物理上正确。
 - **限制**：雨区内为**均匀面雨**，没有空间梯度；不含蒸发/下渗/出流边界；GUI 历时范围 10~600s，所以 1mm 这种小雨在一场雨里几乎不可见（真实亦如此，想看明显积水请用 100~1000mm 或切回强度模式长跑）。
-- 验证：`test/verify_rainfall.mjs`（32 项）覆盖配置换算、注入推进与自动停止、回读水量量级、100mm vs 1000mm 质量比 ≈10、重置归零、切回强度模式、5 档图例与无致命错误，ALL PASS。演示图 `docs/images/15_rain_amount.png`（出图脚本 `test/demo_rain_amount.mjs`）。
+- **GUI 按模式显隐的坑（dat.GUI）**：`controller.domElement` 是控件容器 `div.c`（滑块/下拉本体），不是占一行的 `li.cr`。只把 `domElement.style.display` 设为 none 会**留下空行**（标签还在、行高不变），必须 `domElement.closest("li.cr")` 整行隐藏；验证时也不能只看 `domElement`，要用整行的 `getComputedStyle` 或「面板高度变化」（实测强度模式 222px / 雨量模式 361px）。
+- 验证：`test/verify_rainfall.mjs`（35 项）覆盖配置换算、注入推进与自动停止、回读水量量级、100mm vs 1000mm 质量比 ≈10、重置归零、切回强度模式、GUI 整行显隐与面板高度变化、5 档图例与无致命错误，ALL PASS。演示图 `docs/images/15_rain_amount.png`（出图脚本 `test/demo_rain_amount.mjs`）。
 
 ## 6. 关键修复记录
 
@@ -550,7 +551,7 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 | `probe_water_inside2.mjs` | 夹具 DEM 盒内机位高度扫描（:9223）：逐高度打印 `_insideBox`/局部坐标/体积阶段开/关像素差 + 截图，是 §6.10 的定位与验证脚本 |
 | `probe_zh_inside.mjs` / `probe_zh_inside2.mjs` / `diag_zh_layer.mjs` | 中文叠加层 / 盒内水平视角出图探针（其中 `diag_zh_layer.mjs` 用来确认影像层顺序，避免后加的底图盖住中文叠加层） |
 | `probe_tiles_zh2.mjs` / `probe_tiles_zh3.mjs` | 中文瓦片源探测（页面内 fetch + `createImageBitmap` 统计透明像素）：确认高德 `webst0{s}...style=8&scl=1` 为透明叠加层（不透明像素 8.1%），天地图/Esri/OSM 在当时网络下不可达 |
-| `verify_rainfall.mjs` | **雨量模式（按实际降雨量模拟）**回归（32 项）：默认配置与 `massPerMm=1e-4`、等效雨强换算、100mm/10s 注入推进→自动停止且已降雨量 100.000mm、回读 `surfaceTexture` 水体量级合理、1000mm/10s 注满且与 100mm 水体总质量比 10.36≈10、重置后水量/雨量归零、切回强度模式仍按 0.0004 注入、5 档图例、无致命错误（§5.13） |
+| `verify_rainfall.mjs` | **雨量模式（按实际降雨量模拟）**回归（35 项）：默认配置与 `massPerMm=1e-4`、等效雨强换算、100mm/10s 注入推进→自动停止且已降雨量 100.000mm、回读 `surfaceTexture` 水体量级合理、1000mm/10s 注满且与 100mm 水体总质量比 10.36≈10、重置后水量/雨量归零、切回强度模式仍按 0.0004 注入、5 档图例、无致命错误（§5.13） |
 | `demo_rain_amount.mjs` | 生成雨量模式演示截图：一场 500mm/60s 的雨下完后两雨区的汇水分布与 GUI 面板（`rain_amount_wide.png`/`rain_amount_mid.png`） |
 
 **断言清单**：页面 ready → Viewer 创建 → **默认全球模式（无 DEM/无流体、btnGlobe 存在、划域按钮可用）** → **全球模式画多边形→采样真实地形→生成域掩膜+域约束+流体启动（"🌊 模拟进行中"、sourceMode=globe、bbox=多边形范围）** → 无着色器错误 → **域外雨区被拒绝、域内雨区成功 + 掩膜生成** → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → GeoTIFF 自动解析 bbox 后划域 → **UTM 投影换算为同区域经纬度**后划域 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确后划域 → 无致命控制台错误。
@@ -648,5 +649,6 @@ fluid-sph-rain/
 
 - SPH 着色器移植自 [shadertoy 7tSSDD](https://www.shadertoy.com/view/7tSSDD) 与 [shadertoy l33Sz8](https://www.shadertoy.com/view/l33Sz8)，Cesium 移植与原始架构来自 [少年啦1997/fluid-sph](https://github.com/shaonianla1997/fluid-sph)，本项目为其学习用途的增强开发版，原作者声明（见 README）继续有效，**禁止商用售卖**。
 - 内置示例高程图版权归原作者所有，仅作演示。
+
 
 
