@@ -15,6 +15,7 @@ import { sampleTerrainDem } from "./src/io/terrainSampler.js";
 import { RainRegionEditor } from "./src/ui/rainRegionEditor.js";
 import { DomainEditor } from "./src/ui/domainEditor.js";
 import { createRainEffect } from "./src/render/rainEffect.js";
+import { CASES, getCase } from "./src/data/cases.js";
 import { rasterizeRainMask } from "./src/sim/rainMask.js";
 import { rasterizeDomainMask } from "./src/sim/domainMask.js";
 import {
@@ -543,6 +544,7 @@ async function initViewer() {
 
   wireToolbar();
   buildGui();
+  buildCasePanel();
   syncDepthColorUniforms();
   updateDepthLegend();
 
@@ -1001,6 +1003,7 @@ function toggleWholeRain(on) {
 function wireToolbar() {
   dom.btnUpload = $("btnUpload");
   dom.btnGlobe = $("btnGlobe");
+  dom.btnCases = $("btnCases");
   dom.btnDomain = $("btnDomain");
   dom.btnDraw = $("btnDraw");
   dom.btnWholeRain = $("btnWholeRain");
@@ -1074,6 +1077,276 @@ function refreshButtons() {
   dom.btnWholeRain.disabled = !hasSim;
   dom.btnClearRegions.disabled = !(regionEditor && regionEditor.allRegions().length > 0);
   if (dom.btnReset) dom.btnReset.disabled = !hasSim;
+}
+
+/* ==================================================================== */
+/* 山洪案例库                                                            */
+/* ==================================================================== */
+
+/** 当前选中的案例（面板）与正在复演的案例 */
+let caseSelectedId = null;
+let activeCaseId = null;
+let caseBusy = false;
+const caseDom = {};
+
+function buildCasePanel() {
+  caseDom.panel = $("casePanel");
+  caseDom.list = $("caseList");
+  caseDom.detail = $("caseDetail");
+  caseDom.close = $("caseClose");
+  caseDom.btn = dom.btnCases;
+  if (!caseDom.panel || !caseDom.list || !caseDom.detail) return;
+
+  renderCaseList();
+  caseDom.btn?.addEventListener("click", () => {
+    if (caseDom.panel.hidden) openCasePanel();
+    else closeCasePanel();
+  });
+  caseDom.close?.addEventListener("click", closeCasePanel);
+  caseDom.panel.addEventListener("click", (e) => {
+    if (e.target === caseDom.panel) closeCasePanel();
+  });
+}
+
+function openCasePanel() {
+  if (!caseDom.panel) return;
+  caseDom.panel.hidden = false;
+  if (!caseSelectedId) selectCaseCard(CASES[0]?.id ?? null);
+  else selectCaseCard(caseSelectedId);
+}
+
+function closeCasePanel() {
+  if (caseDom.panel) caseDom.panel.hidden = true;
+}
+
+/** 左侧案例卡片列表 */
+function renderCaseList() {
+  caseDom.list.innerHTML = "";
+  for (const c of CASES) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "case-card";
+    card.dataset.caseId = c.id;
+    const name = document.createElement("div");
+    name.className = "cc-name";
+    name.textContent = c.name;
+    const meta = document.createElement("div");
+    meta.className = "cc-meta";
+    meta.innerHTML = `<span>${c.site}</span><span>${c.date}</span><span class="cc-badge">${c.scenario}</span>`;
+    card.appendChild(name);
+    card.appendChild(meta);
+    card.addEventListener("click", () => selectCaseCard(c.id));
+    caseDom.list.appendChild(card);
+  }
+}
+
+/** 选中案例：高亮卡片 + 渲染右侧详情 */
+function selectCaseCard(id) {
+  const c = getCase(id);
+  if (!c) return;
+  caseSelectedId = id;
+  for (const el of caseDom.list.querySelectorAll(".case-card")) {
+    el.classList.toggle("selected", el.dataset.caseId === id);
+  }
+  renderCaseDetail(c);
+}
+
+function renderCaseDetail(c) {
+  const el = caseDom.detail;
+  el.innerHTML = "";
+  const h = document.createElement("h2");
+  h.textContent = c.name;
+  const site = document.createElement("div");
+  site.className = "cd-site";
+  site.textContent = `${c.site} · ${c.date} · 情景：${c.scenario}`;
+  el.appendChild(h);
+  el.appendChild(site);
+
+  const facts = document.createElement("div");
+  facts.className = "cd-facts";
+  for (const chip of [
+    `等级：${c.severity}`,
+    `伤亡：${c.loss}`,
+    `雨量：${c.mm} mm / ${c.dur} s`,
+    `复演范围：${((c.extent[2] - c.extent[0]) * 111 * Math.cos((c.extent[1] * Math.PI) / 180)).toFixed(1)} km × ${((c.extent[3] - c.extent[1]) * 111).toFixed(1)} km`,
+  ]) {
+    const s = document.createElement("span");
+    s.className = "cd-chip" + (chip.startsWith("伤亡") ? " hot" : "");
+    s.textContent = chip;
+    facts.appendChild(s);
+  }
+  el.appendChild(facts);
+
+  const addBlock = (title, text) => {
+    const t = document.createElement("h3");
+    t.textContent = title;
+    const p = document.createElement("p");
+    p.textContent = text;
+    el.appendChild(t);
+    el.appendChild(p);
+  };
+  addBlock("事件概况", c.summary);
+  addBlock("模拟假设与预期", c.mechanism);
+
+  const src = document.createElement("div");
+  src.className = "cd-src";
+  const st = document.createElement("h3");
+  st.textContent = "资料来源";
+  src.appendChild(st);
+  for (const s of c.sources) {
+    const a = document.createElement("a");
+    a.href = s.url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = s.label;
+    src.appendChild(a);
+    src.appendChild(document.createTextNode("　"));
+  }
+  el.appendChild(src);
+
+  const actions = document.createElement("div");
+  actions.className = "cd-actions";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "case-run";
+  btn.textContent = "▶ 一键复演";
+  btn.disabled = caseBusy;
+  btn.addEventListener("click", () => runCase(c.id));
+  const hint = document.createElement("span");
+  hint.className = "cd-hint";
+  hint.textContent = "复演将重置当前模拟，按案例参数采样地形、划域、划雨区并开始降雨。";
+  actions.appendChild(btn);
+  actions.appendChild(hint);
+  el.appendChild(actions);
+  caseDom.runBtn = btn;
+}
+
+const caseSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 一键复演：teardown → 全球地形采样划域 → 划雨区 → 雨量模式 → 机位 → 开始降雨。
+ * 全过程复用现有主流程（与手工操作完全一致），因此 UI、图例、统计都会正常刷新。
+ */
+async function runCase(id) {
+  const c = getCase(id);
+  if (!c || caseBusy) return { ok: false, reason: caseBusy ? "busy" : "unknown-case" };
+  caseBusy = true;
+  if (caseDom.runBtn) {
+    caseDom.runBtn.disabled = true;
+    caseDom.runBtn.textContent = "⏳ 复演中…";
+  }
+  closeCasePanel();
+  try {
+    teardownSimulation(true);
+    setStatus(
+      `📚 <strong>正在载入案例：${c.name}</strong><br>${c.site} · ${c.date} · 情景 ${c.scenario}<br>正在采样真实地形并划定模拟域…`,
+    );
+
+    // 1) 模拟域：在全球地形上按 uv 多边形提交，内部会用采样地形启动 SPH
+    if (!domainEditor) return { ok: false, reason: "not-ready" };
+    domainEditor.startDrawing(null);
+    domainEditor._commit(
+      c.domainUv.map(([u, v]) =>
+        Cesium.Cartographic.fromDegrees(
+          c.extent[0] + u * (c.extent[2] - c.extent[0]),
+          c.extent[1] + (1 - v) * (c.extent[3] - c.extent[1]),
+        ),
+      ),
+    );
+    domainEditor.stopDrawing();
+
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline && !(fluid && !state.pendingDomainDem)) {
+      await caseSleep(100);
+    }
+    if (!fluid) {
+      setStatus(`❌ 案例复演失败：地形采样超时。请检查网络后重试（${c.name}）`);
+      return { ok: false, reason: "terrain-timeout" };
+    }
+
+    // 2) 降雨区（案例保证多边形在域内）
+    const e = state.extent;
+    regionEditor.startDrawing(e);
+    regionEditor._commitRegion(
+      c.rainUv.map(([u, v]) =>
+        Cesium.Cartographic.fromDegrees(
+          e[0] + u * (e[2] - e[0]),
+          e[1] + (1 - v) * (e[3] - e[1]),
+        ),
+      ),
+    );
+    regionEditor.stopDrawing();
+
+    // 3) 雨量模式参数（与 GUI 手工设置等价）
+    options.rainMode = "amount";
+    options.rainAmountMm = Math.min(1000, Math.max(1, c.mm));
+    options.rainDurationSec = Math.min(600, Math.max(10, c.dur));
+    fluid.resetRainAmount();
+    rainProgress.mm = "0.0";
+    rainProgress.rate = rainAmountRateMmH().toFixed(0);
+    rainGuiCtrls?.amount?.updateDisplay?.();
+    rainGuiCtrls?.duration?.updateDisplay?.();
+    rainGuiCtrls?.mode?.updateDisplay?.();
+    syncRainModeGui();
+    refreshRainSummary();
+
+    // 4) 机位：案例经纬度 + 离地高度（AGL），朝上游看
+    await setCaseCamera(c.camera);
+
+    // 5) 开始降雨
+    options.rainEnabled = true;
+    rainGuiCtrls?.enabled?.updateDisplay?.();
+    applyRainRegions();
+    refreshButtons();
+
+    activeCaseId = c.id;
+    const rate = rainAmountRateMmH().toFixed(0);
+    setStatus(
+      `📚 <strong>案例复演中：${c.name}</strong><br>` +
+        `${c.site} · ${c.date} · 伤亡 ${c.loss}<br>` +
+        `模拟域 <strong>${areaLabel(state.domain?.areaKm2 ?? 0)}</strong> · 雨区 <strong>${areaLabel(
+          regionEditor.getActiveRegions().reduce((s, r) => s + (r.areaKm2 || 0), 0),
+        )}</strong><br>` +
+        `降雨：雨量模式 · 累计 <strong>${c.mm} mm</strong> / 历时 ${c.dur}s（≈${rate} mm/h，注满自动停）<br>` +
+        `提示：右侧 GUI 可实时看「已降雨量(mm)」；「🧹 重置模拟」可清空水量重跑本案例。`,
+    );
+    return { ok: true, caseId: c.id, mm: c.mm, dur: c.dur, domainKm2: state.domain?.areaKm2 ?? 0 };
+  } catch (err) {
+    console.error(err);
+    setStatus(`❌ 案例复演失败：${err?.message ?? err}`);
+    return { ok: false, reason: String(err?.message ?? err) };
+  } finally {
+    caseBusy = false;
+    if (caseDom.runBtn) {
+      caseDom.runBtn.disabled = false;
+      caseDom.runBtn.textContent = "▶ 一键复演";
+    }
+  }
+}
+
+/** 案例机位：先采样地面高程，再按 AGL 放置相机 */
+async function setCaseCamera(cam) {
+  if (!cam || !viewer) return;
+  const tp = viewer.terrainProvider;
+  let ground = 0;
+  try {
+    const carto = (
+      await Cesium.sampleTerrainMostDetailed(tp, [Cesium.Cartographic.fromDegrees(cam.lon, cam.lat)])
+    )[0];
+    ground = carto?.height ?? 0;
+  } catch {
+    ground = 0;
+  }
+  const camera = viewer.camera;
+  camera.cancelFlight();
+  camera.setView({
+    destination: Cesium.Cartesian3.fromDegrees(cam.lon, cam.lat, ground + (cam.agl ?? 2000)),
+    orientation: {
+      heading: Cesium.Math.toRadians(cam.heading ?? 180),
+      pitch: Cesium.Math.toRadians(cam.pitch ?? -30),
+      roll: 0,
+    },
+  });
 }
 
 let gui;
@@ -1263,7 +1536,7 @@ function buildGui() {
       syncRainModeGui();
       refreshRainSummary();
     });
-  fRain
+  const cEnabled = fRain
     .add(options, "rainEnabled")
     .name("开始降雨")
     .onChange(() => {
@@ -1309,6 +1582,7 @@ function buildGui() {
     preset: cPreset,
     mm: cRainMm,
     rate: cRainRate,
+    enabled: cEnabled,
   };
   syncRainModeGui();
 
@@ -2066,6 +2340,12 @@ window.__app = {
       amount: rainFxAmount(),
     };
   },
+  /** 测试钩子：开关雨滴视觉效果（等价 GUI「雨滴下落效果」） */
+  setRainFx(on = true) {
+    options.rainFx = !!on;
+    state.rainFx?.setEnabled?.(options.rainFx);
+    return this.rainFxInfo();
+  },
   /** 5 档水深配色状态（测试用）：bands/colors 按档位顺序返回数组 */
   depthConfig() {
     return {
@@ -2125,6 +2405,14 @@ window.__app = {
     rainGuiCtrls?.duration?.updateDisplay?.();
     rainGuiCtrls?.preset?.updateDisplay?.();
     syncRainModeGui();
+    refreshRainSummary();
+    return this.rainfallConfig();
+  },
+  /** 测试钩子：开/关降雨总开关（等价于勾选 GUI「开始降雨」） */
+  setRainEnabled(on = true) {
+    options.rainEnabled = !!on;
+    rainGuiCtrls?.enabled?.updateDisplay?.();
+    applyRainRegions();
     refreshRainSummary();
     return this.rainfallConfig();
   },
@@ -2304,5 +2592,46 @@ window.__app = {
   /** 测试：手动放置流程（等价于在 (lon,lat) 点击底图） */
   testPlaceAt(lon, lat) {
     return placePendingDemAtDegrees(lon, lat);
+  },
+
+  /* —— 山洪案例库 —— */
+  /** 案例清单（精简字段，供测试与外部查询） */
+  cases() {
+    return CASES.map((c) => ({
+      id: c.id,
+      name: c.name,
+      site: c.site,
+      date: c.date,
+      scenario: c.scenario,
+      mm: c.mm,
+      dur: c.dur,
+    }));
+  },
+  /** 一键复演案例：走与 UI 按钮完全相同的流程 */
+  runCase(id) {
+    return runCase(id);
+  },
+  /** 当前正在复演的案例 id（未复演为 null） */
+  activeCase() {
+    return activeCaseId;
+  },
+  /** 打开/关闭案例库面板（测试用） */
+  openCases() {
+    openCasePanel();
+    return !caseDom.panel?.hidden;
+  },
+  closeCases() {
+    closeCasePanel();
+    return !!caseDom.panel?.hidden;
+  },
+  /** 案例库 DOM 状态（测试用） */
+  caseState() {
+    return {
+      open: !caseDom.panel?.hidden,
+      cards: caseDom.list?.querySelectorAll(".case-card").length ?? 0,
+      selected: caseSelectedId,
+      active: activeCaseId,
+      busy: caseBusy,
+    };
   },
 };

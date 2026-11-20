@@ -95,6 +95,13 @@
 - 完整分析（事件经过、地形“漏斗”机理、预警与实际雨量落差、参数设置、结果对比、局限与启示）见 **[docs/ANALYSIS_shuangshimen.md](docs/ANALYSIS_shuangshimen.md)**。
 - 复演脚本：`test/demo_shuangshimen.mjs`；图：`docs/images/16_shuangshimen_50mm.png`、`docs/images/17_shuangshimen_150mm.png`。
 
+### 10. 山洪案例库：点击案例 → 一键复演
+- 工具栏「📚 案例库」打开案例面板：左栏卡片列出全部山洪案例（地点、日期、伤亡、雨量情景），右栏显示事件概况、模拟假设、地形机理与参考资料链接。
+- 点「▶ 一键复演」后自动完成：清空当前模拟 → 按案例坐标划定模拟域（全球真实地形）→ 圈定上游雨区 → 设置雨量模式与累计雨量/历时 → 把相机移到案例机位 → 开始降雨。状态栏与面板底部同步显示「案例复演中」及规模信息，可随时点「🧹 重置模拟」重跑。
+- 内置 4 个案例：**双石门沟“7·26”（甘肃渭源，2026-07-26，25 死 23 伤）**，含 50 mm 预警量级与 150 mm 局地强暴雨两种情景；**龙槽沟“8·13”（四川彭州，2022-08-13，7 死 8 轻伤，非开放景区）**；**大通“8·17”（青海大通青山乡，2022-08-17，17 死 17 失联，高原夜间突发）**。
+- 数据定义在 `src/data/cases.js`（`extent`/`domainUv`/`rainUv`/`mm`/`dur`/`camera`），新增案例只需追加一条配置；坐标均为按公开报道与地形探针确定的沟谷一带，属**示意性复演**（非官方灾点精确坐标），雨量为情景假设，用于比较不同量级的淹没形态差异。
+- 回归：`test/verify_cases.mjs`（16 项，含面板/卡片/详情/一键复演/域与雨区/雨量参数/画面水色差分）；四案例逐一实跑脚本 `test/probe_cases_all.mjs`。
+
 ## 运行
 
 ```bash
@@ -123,6 +130,7 @@ src/io/projection.js           地理参考解析：GeoKey → proj4 → 经纬�
 src/io/terrainSampler.js       全球模式：采样真实地形高程 → 1024² 灰度 DEM
 src/ui/domainEditor.js         模拟域（任意多边形）交互绘制与管理（全球自由模式 + 上传模式）
 src/ui/rainRegionEditor.js     降雨区域交互绘制与管理（含域内顶点校验）
+src/data/cases.js              山洪案例库数据（4 个事件：范围/域/雨区/雨量/机位/资料来源）
 src/render/FluidPipelineStages.js   原版 Compute/Volume 渲染阶段（体积盒内外双渲染状态：贴地可见水）
 src/render/rainEffect.js       屏幕空间雨丝后处理（PostProcessStage）
 libs/geotiff.min.js            GeoTIFF 解析库（jsdelivr 构建）

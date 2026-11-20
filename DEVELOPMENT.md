@@ -43,6 +43,7 @@
 | 6 | **公共资源标注（路名/地名）+ 降雨时的雨滴下落效果 + 5 档水深配色** | 底图之上叠加 ArcGIS `Reference/World_Transportation`（道路网/路名/公路编号）与 `Reference/World_Boundaries_and_Places`（地名/边界）两层透明瓦片；屏幕空间后处理雨丝（密度随雨强）；水色按 `0–2/2–5/5–10/10–20/>20 m` 五档着色 + 左下角图例 | `index.js`（`addReferenceLayers`）+ `src/render/rainEffect.js` + `src/sim/shaders.js`（`depthRamp`） |
 | 7 | **中文路网/地名标注 + 相机贴近地面（进入体积盒）时水体仍可见** | 新增高德「透明路网+中文注记」叠加层（免 tk，中国境内）与天地图注记层（需自备 tk，无偏移）；体积阶段改为**相机在盒内时关闭背面剔除与深度测试**，由片元着色器自行做地形遮挡判断 | `index.js`（`syncZhLayers` / `ensureAmapZhLayer`）+ `src/render/FluidPipelineStages.js`（`_isCameraInsideBox` + `volumeInsideRenderState`）+ `src/sim/shaders.js`（`wt < min(tt, ret.y)`） |
 | 8 | **按实际降雨量模拟（1mm~1000mm，一场雨下完自动停）** | 雨量模式：给定累计雨量(mm)+降雨历时(s)，按体积守恒换算每格质量（`massPerMm = 1/(250×depthFullM)`，1000mm ⇒ 图例水深 1m），按「剩余量/剩余历时 × 真实 dt」逐帧分摊注入，达到设定雨量自动停止；预设 1/10/25/50/100/250/500/1000mm | `index.js`（`rainMode` / `_updateRainInjection` / `rainMassPerMm` + GUI「降雨控制」） |
+| 9 | **山洪案例库：点击案例 → 一键复演历史事件** | 工具栏「📚 案例库」面板列出 4 个山洪案例（地点/日期/伤亡/雨量情景 + 概况/机理/来源）；「▶ 一键复演」自动清空当前模拟 → 按案例取景范围建域 → 圈雨区 → 设雨量模式与累计雨量 → 移到案例机位 → 开始降雨 | `src/data/cases.js` + `index.js`（`buildCasePanel` / `runCase` / `setCaseCamera`） |
 
 顺带完成的基础增强：
 
@@ -58,6 +59,7 @@
 - **中文路网 / 地名标注**：除 ArcGIS 英文参考层外，新增高德「透明路网 + 中文注记」叠加层（免 tk、中国境内有效，GUI 可开关）与天地图中文注记层（需自备 tk，WGS84 无偏移）；卫星影像 + 中文村镇名/路名可直接叠加查看（§5.9）。
 - **贴近地面也能看到水**：修复相机飞进体积盒内部后水体被整片剔除的问题——盒内改用「不剔除 + 关深度测试 + 片元着色器自遮挡」的渲染状态，任何机位高度都能看到水面与 5 档配色（§5.12 / §6.10）。
 - **按实际降雨量模拟**：新增雨量模式，可按 `1mm ~ 1000mm` 的一场雨模拟——设定累计雨量与历时后按体积守恒注水（1000mm ⇒ 图例水深 1m），下完自动停止；面板实时显示已降雨量与等效雨强，并提供 GB/T 28592 等级预设（§5.13）。
+- **山洪案例库**：内置 4 个历史山洪案例（双石门沟 50/150mm、龙槽沟 50mm、大通 80mm），点击卡片即可一键复演，无需手动记坐标/画域/设雨量（§5.15）。
 
 ## 2. 效果展示
 
@@ -114,6 +116,10 @@
 ![双石门 50mm](docs/images/16_shuangshimen_50mm.png)
 
 ![双石门 150mm](docs/images/17_shuangshimen_150mm.png)
+
+**山洪案例库：卡片式案例列表 + 事件详情，点「▶ 一键复演」自动建域/圈雨区/设雨量并开始模拟**：
+
+![山洪案例库](docs/images/18_case_library.png)
 
 ## 3. 快速开始
 
@@ -445,6 +451,18 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 - **脚本要点**：①雨区顶点必须严格在模拟域内，否则 `RainRegionEditor` 整块拒绝、`_rainMaskLive` 为 null，雨量模式判定无雨区而不注水（首跑即踩此坑，雨区内缩后才通）；②出图前遍历 `viewer.entities` 把 `e.polygon.show`/`e.label.show` 置 false，去掉半透明填充蒙版与标签，只留描边与图例；③页面被遮挡时 rAF 暂停导致仿真时间落后于墙钟，**必须轮询 `rainfallConfig().stats` 直到 `passInjection===0`** 再截图，不能用固定 `sleep`。
 - 图：`docs/images/16_shuangshimen_50mm.png`、`docs/images/17_shuangshimen_150mm.png`。
 
+### 5.15 山洪案例库（点击案例 → 一键复演）
+
+把单次复演脚本沉淀为**案例库**，让用户在界面里直接复现多个历史山洪事件，而不用改代码或记住坐标。
+
+- **数据**：`src/data/cases.js` 导出 `CASES`（4 条）与 `getCase(id)`。每条案例 = `id / site / name / date / severity / loss / scenario / summary / mechanism / sources / extent / domainUv / rainUv / mm / dur / camera{lon,lat,agl,pitch,heading}`。新增案例只需追加一条配置。
+- **内置案例**：`shuangshimen-50` 与 `shuangshimen-150`（甘肃渭源双石门沟 7·26，两种雨量情景）；`longcaogou-50`（四川彭州龙槽沟 8·13，7 死 8 轻伤，非开放景区）；`datong-80`（青海大通青山乡 8·17，17 死 17 失联，高原夜间突发）。坐标由公开报道 + 实机地形探针确定，属**沟谷一带示意性复演**，雨量为情景假设。
+- **UI**：工具栏「📚 案例库」打开面板（`.case-sheet` 1080×700，左栏 360px 卡片列表、右栏详情）：卡片显示地点/日期/伤亡/雨量情景；详情显示事件概况、模拟假设、地形机理、参考资料外链与「▶ 一键复演」按钮。面板与卡片样式在 `index.html` 的 `<style>` 内。
+- **一键复演流程**（`index.js#runCase`）：防重入 → 关面板 → `teardownSimulation(true)` → `domainEditor._commit(domainUv)` → 轮询至 `fluid && !state.pendingDomainDem`（≤90 s）→ `regionEditor._commitRegion(rainUv)` → 写 `options.rainMode="amount"/rainAmountMm/rainDurationSec` → `fluid.resetRainAmount()` 并同步 GUI/状态栏 → `setCaseCamera()`（`sampleTerrainMostDetailed` 取地面高程 + AGL，`cancelFlight` 后 `setView`）→ `options.rainEnabled = true` + `applyRainRegions()` → 状态栏写入案例名/面积/雨量/等效雨强。
+- **测试钩子**：`__app.cases()`、`runCase(id)`、`activeCase()`、`openCases()/closeCases()`、`caseState()`、`setRainEnabled(on)`、`setRainFx(on)`。
+- **验证**：`test/verify_cases.mjs`（16 项）覆盖面板开合、卡片数量、详情内容、一键复演、模拟域/雨区面积、雨量参数与目标质量、状态栏案例名、**画面像素差分确认水确实被渲染出来**（关雨滴后取基线，注入 ≥40 mm 后对比，蓝色像素 0.23%→2.28%）、无致命错误；四案例逐一实跑 `test/probe_cases_all.mjs` 均正常建域/建雨区/注水。
+- **踩坑**：①案例面板的启动按钮必须等 `fluid` 真正建立后再提交雨区，否则 `regionEditor` 尚无域多边形会整块拒绝；②测"水是否出现"时不能读 `_simTextures`（当前 Chrome 下 float 纹理回读恒 0），改用页面内 `gl.readPixels` 抓默认帧缓冲做差分；③雨滴后处理会让全屏像素变化，差分前必须 `setRainFx(false)`。
+
 ## 6. 关键修复记录
 
 五个踩坑极深的 bug + 一个状态栏覆盖问题，记录根因与验证方法，避免后续重蹈（§6.4/§6.5 为模拟域改造新增，§6.6 为真机 GPU 着色器编译失败）：
@@ -577,6 +595,10 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 | `verify_rainfall.mjs` | **雨量模式（按实际降雨量模拟）**回归（35 项）：默认配置与 `massPerMm=1e-4`、等效雨强换算、100mm/10s 注入推进→自动停止且已降雨量 100.000mm、回读 `surfaceTexture` 水体量级合理、1000mm/10s 注满且与 100mm 水体总质量比 10.36≈10、重置后水量/雨量归零、切回强度模式仍按 0.0004 注入、5 档图例、无致命错误（§5.13） |
 | `demo_rain_amount.mjs` | 生成雨量模式演示截图：一场 500mm/60s 的雨下完后两雨区的汇水分布与 GUI 面板（`rain_amount_wide.png`/`rain_amount_mid.png`） |
 | `demo_shuangshimen.mjs` | **甘肃渭源双石门沟“7·26”山洪复演**：全球地形定位 → 3.5×4.4 km 域 + 1.46 km² 上游雨区 → 雨量模式（50/150 mm per 60 s）→ 回读 `surfaceTexture` 统计湿面/最大水深/5 档 → 出图（`node test/demo_shuangshimen.mjs 150 60 s150`）；先例：雨区顶点必须全在域内、出图前隐藏 polygon/label、等待 `passInjection===0` 再截图（§5.14） |
+| `verify_cases.mjs` | **山洪案例库**回归（16 项）：`#btnCases` 开面板、卡片数=4、点卡片出详情、点「▶ 一键复演」进入案例模拟、面板自动关闭、域/雨区面积 >0、雨量参数与案例一致（amount/150mm/60s）、目标质量 >0、状态栏含案例名、注入推进 ≥40mm、**关雨滴后画面像素差分确认水面出现**（蓝色像素 0.23%→2.28%）、无致命错误（§5.15） |
+| `probe_cases_geo.mjs` / `probe_cases_terrain.mjs` | 案例静态几何校验（雨区顶点是否都在域内、面积）与地形采样校验（高程范围/起伏/机位地面高程 + 截图） |
+| `probe_cases_all.mjs` | 四案例逐一实跑：建域/雨区/注水/机位截图 `case_run_<id>.png`，确认 `rainTotalKm2>0`、`targetMass>0` |
+| `probe_datong_area.mjs` | 大通案例候选范围地形起伏对比（5 个 extent 的 min/max/relief），用于把案例坐标调到起伏最明显的沟谷 |
 
 **断言清单**：页面 ready → Viewer 创建 → **默认全球模式（无 DEM/无流体、btnGlobe 存在、划域按钮可用）** → **全球模式画多边形→采样真实地形→生成域掩膜+域约束+流体启动（"🌊 模拟进行中"、sourceMode=globe、bbox=多边形范围）** → 无着色器错误 → **域外雨区被拒绝、域内雨区成功 + 掩膜生成** → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → GeoTIFF 自动解析 bbox 后划域 → **UTM 投影换算为同区域经纬度**后划域 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确后划域 → 无致命控制台错误。
 
@@ -658,6 +680,8 @@ fluid-sph-rain/
 │   ├── ui/
 │   │   ├── domainEditor.js     模拟域（任意多边形）交互绘制/管理
 │   │   └── rainRegionEditor.js 降雨区域交互绘制/管理（含域内顶点校验）
+│   ├── data/
+│   │   └── cases.js            山洪案例库数据（4 个事件：范围/域/雨区/雨量/机位/来源，§5.15）
 │   └── render/                 原版渲染阶段（FluidCompute/Volume Stage、纹理工厂）
 │       └── rainEffect.js       屏幕空间雨丝后处理（PostProcessStage，§5.10）
 ├── libs/                       dat.gui / geotiff / proj4（本地化，离线可用）

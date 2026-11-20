@@ -147,6 +147,198 @@
         font-variant-numeric: tabular-nums;
       }
 
+      /* ===== 山洪案例库 ===== */
+      #casePanel {
+        position: fixed;
+        inset: 0;
+        z-index: 10050;
+        background: rgba(2, 6, 23, 0.62);
+        backdrop-filter: blur(3px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: system-ui, sans-serif;
+      }
+      #casePanel[hidden] {
+        display: none;
+      }
+      .case-sheet {
+        width: min(1080px, 94vw);
+        height: min(700px, 82vh);
+        background: rgba(15, 23, 42, 0.97);
+        border: 1px solid rgba(148, 163, 184, 0.4);
+        border-radius: 12px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+      }
+      .case-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 16px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+      }
+      .case-title {
+        color: #e2e8f0;
+        font-size: 15px;
+        font-weight: 600;
+      }
+      .case-sub {
+        color: #94a3b8;
+        font-size: 12px;
+        font-weight: 400;
+        margin-left: 8px;
+      }
+      .case-close {
+        appearance: none;
+        background: transparent;
+        border: none;
+        color: #94a3b8;
+        font-size: 22px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0 4px;
+      }
+      .case-close:hover {
+        color: #e2e8f0;
+      }
+      .case-body {
+        flex: 1;
+        display: flex;
+        min-height: 0;
+      }
+      .case-list {
+        width: 360px;
+        flex: none;
+        border-right: 1px solid rgba(148, 163, 184, 0.25);
+        overflow-y: auto;
+        padding: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .case-card {
+        text-align: left;
+        appearance: none;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        background: rgba(30, 41, 59, 0.75);
+        color: #cbd5e1;
+        border-radius: 9px;
+        padding: 10px 12px;
+        cursor: pointer;
+        transition: border-color 0.15s, background 0.15s;
+      }
+      .case-card:hover {
+        border-color: #38bdf8;
+        background: rgba(51, 65, 85, 0.85);
+      }
+      .case-card.selected {
+        border-color: #38bdf8;
+        background: rgba(2, 132, 199, 0.22);
+      }
+      .case-card .cc-name {
+        color: #e2e8f0;
+        font-size: 13.5px;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+      .case-card .cc-meta {
+        color: #94a3b8;
+        font-size: 11.5px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .case-card .cc-badge {
+        color: #7dd3fc;
+      }
+      .case-detail {
+        flex: 1;
+        overflow-y: auto;
+        padding: 16px 18px;
+        color: #cbd5e1;
+        font-size: 13px;
+        line-height: 1.65;
+      }
+      .case-empty {
+        color: #64748b;
+        margin-top: 18px;
+      }
+      .case-detail h2 {
+        margin: 0 0 4px;
+        font-size: 17px;
+        color: #f1f5f9;
+      }
+      .case-detail .cd-site {
+        color: #7dd3fc;
+        font-size: 12.5px;
+        margin-bottom: 10px;
+      }
+      .case-detail .cd-facts {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin: 10px 0 12px;
+      }
+      .case-detail .cd-chip {
+        background: rgba(30, 41, 59, 0.9);
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-size: 11.5px;
+        color: #cbd5e1;
+      }
+      .case-detail .cd-chip.hot {
+        border-color: rgba(248, 113, 113, 0.5);
+        color: #fca5a5;
+      }
+      .case-detail h3 {
+        margin: 14px 0 4px;
+        font-size: 13px;
+        color: #7dd3fc;
+        font-weight: 600;
+      }
+      .case-detail p {
+        margin: 6px 0;
+      }
+      .case-detail .cd-src a {
+        color: #93c5fd;
+        text-decoration: none;
+      }
+      .case-detail .cd-src a:hover {
+        text-decoration: underline;
+      }
+      .case-detail .cd-actions {
+        margin: 16px 0 6px;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+      .case-run {
+        appearance: none;
+        border: 1px solid #38bdf8;
+        background: #0284c7;
+        color: #fff;
+        font-size: 13.5px;
+        font-weight: 600;
+        padding: 9px 18px;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .case-run:hover:not(:disabled) {
+        background: #0369a1;
+      }
+      .case-run:disabled {
+        opacity: 0.55;
+        cursor: progress;
+      }
+      .cd-hint {
+        color: #94a3b8;
+        font-size: 11.5px;
+      }
+
       .dg.ac {
         z-index: 9998 !important;
       }
@@ -159,6 +351,7 @@
 
     <div id="appToolbar">
       <button id="btnGlobe" title="回到全球地形模式：直接在地形上画区域，无需上传高程图">🌐 全球地形</button>
+      <button id="btnCases" title="打开山洪案例库：一键复演历史山洪事件">📚 案例库</button>
       <button id="btnUpload" title="上传自有 GeoTIFF / PNG / JPG 高程图（可选）">📂 上传高程图</button>
       <button id="btnDomain" title="在地形上左键加点画任意多边形，右键/双击/回车闭合">🗺 划定模拟域</button>
       <button id="btnDraw" title="在模拟域内绘制降雨区域（左键加点，右键结束）" disabled>🌧 绘制降雨区域</button>
@@ -168,6 +361,22 @@
     </div>
 
     <input id="fileInput" type="file" accept=".tif,.tiff,.png,.jpg,.jpeg,.webp,image/tiff,image/png,image/jpeg" />
+
+    <!-- ===== 山洪案例库（点击顶部「📚 案例库」打开） ===== -->
+    <div id="casePanel" hidden>
+      <div class="case-sheet">
+        <div class="case-head">
+          <div class="case-title">📚 山洪案例库 <span class="case-sub">点击案例卡片 → 一键复演</span></div>
+          <button id="caseClose" class="case-close" title="关闭">×</button>
+        </div>
+        <div class="case-body">
+          <div id="caseList" class="case-list"></div>
+          <div id="caseDetail" class="case-detail">
+            <div class="case-empty">从左侧选择一个案例</div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <div id="statusBar">
       正在初始化三维场景…

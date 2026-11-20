@@ -38,3 +38,8 @@ test/check_page.png
 test/*.json
 !test/package.json
 test/smsm_*.png
+
+test/case_*.png
+test/cases_*.png
+test/case_time_diag.png
+test/_served_index.mjs
