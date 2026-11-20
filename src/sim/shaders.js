@@ -526,10 +526,15 @@ vec4 Render(in vec3 ro, in vec3 rd) {
 
             // 透明度：GUI「水透明度」滑块 0 → 完全不透明（alpha=1），
             // 1 → 最透明（alpha=0.2），中间线性插值。
+            // 深度权重不能再用固定的 5% 盒高（那是几十米水深才完全不透明的门槛），
+            // 改为跟着 5 档配色第一档（depthBand0，单位米）走：
+            // 浅浅一层水就有 0.3 的底噪可见度，达到第一档水深即完全不透明。
             // Fresnel/高光也用同一个 waterOpacity 缩放，避免“不透明”时反而漏光、
             // 或“最透明”时高光仍在水面上留一层亮膜。
             float waterOpacity = mix(1.0, 0.2, clamp(waterAlpha, 0.0, 1.0));
-            alpha = waterOpacity * smoothstep(0.0, 0.05, waterDepth);
+            float waterMeters = waterDepth * max(1.0, depthRangeM);
+            float depthWeight = smoothstep(0.0, max(0.05, depthBand0), waterMeters);
+            alpha = waterOpacity * mix(0.55, 1.0, depthWeight);
             alpha = clamp(alpha + waterOpacity * (F * 0.3 + spec * 0.5), 0.0, 1.0);
         }
     }

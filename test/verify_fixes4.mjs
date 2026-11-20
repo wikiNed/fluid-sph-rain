@@ -185,21 +185,52 @@ async function main() {
       for (let i = 0; i < 4; i++) if (stages[i]) stages[i].show = false;
     });
     await sleep(1500);
-    // 用当前模拟域的中心定位机位（夹具 DEM 是北京的，不能用固定经纬度），
-    // 从域南侧低空朝北俯视，保证水体在画面中。
-    await page.evaluate(() => {
+    // 自动挑一个能真正拍到水体的机位：试几个候选（南侧近景/远景、东西侧），
+    // 用“体积阶段开/关”的画面差分挑出差异最大的那个，避免相机拍空导致误判。
+    const camPick = await page.evaluate(async () => {
       const cam = window.__app.viewer.camera;
-      cam.cancelFlight();
       const ext = window.__app.precisionInfo().extent;
       const lon = (ext[0] + ext[2]) / 2;
       const lat = (ext[1] + ext[3]) / 2;
       const spanLat = ext[3] - ext[1];
-      cam.setView({
-        destination: Cesium.Cartesian3.fromDegrees(lon, lat - spanLat * 1.1, 700),
-        orientation: { heading: 0, pitch: Cesium.Math.toRadians(-32), roll: 0 },
-      });
+      const spanLon = ext[2] - ext[0];
+      const thick = Math.max(100, window.__app.depthConfig().boxThicknessM);
+      const candidates = [
+        { lon, lat: lat - spanLat * 0.25, h: thick * 1.2, pitch: -40, heading: 0 },
+        { lon, lat: lat - spanLat * 0.6, h: thick * 1.6, pitch: -45, heading: 0 },
+        { lon: lon - spanLon * 0.6, lat, h: thick * 1.4, pitch: -45, heading: 90 },
+        { lon: lon + spanLon * 0.6, lat, h: thick * 1.4, pitch: -45, heading: 270 },
+      ];
+      const stage = window.__app.fluid._stages[4];
+      let best = null;
+      for (const c of candidates) {
+        cam.cancelFlight();
+        cam.setView({
+          destination: Cesium.Cartesian3.fromDegrees(c.lon, c.lat, c.h),
+          orientation: { heading: Cesium.Math.toRadians(c.heading), pitch: Cesium.Math.toRadians(c.pitch), roll: 0 },
+        });
+        await new Promise((r) => setTimeout(r, 900));
+        stage.show = true;
+        const on = await window.__probe.snap();
+        stage.show = false;
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const off = await window.__probe.snap();
+        const d = window.__probe.diff(on, off);
+        if (!best || d > best.diff) best = { ...c, diff: d };
+      }
+      stage.show = true;
+      return best;
     });
-    await sleep(1800);
+    check("找到一个能拍到水体的机位", camPick && camPick.diff > 0.3, JSON.stringify(camPick));
+    await page.evaluate((c) => {
+      const cam = window.__app.viewer.camera;
+      cam.cancelFlight();
+      cam.setView({
+        destination: Cesium.Cartesian3.fromDegrees(c.lon, c.lat, c.h),
+        orientation: { heading: Cesium.Math.toRadians(c.heading), pitch: Cesium.Math.toRadians(c.pitch), roll: 0 },
+      });
+    }, camPick);
+    await sleep(1200);
 
     // 滑块 = 0 → 完全不透明
     await page.evaluate(() => { window.__app.options.waterAlpha = 0; });

@@ -402,7 +402,8 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 - 因而**不再提供可拖动的分界滑块**（曾经能拖出 23.5–23.5 这类退化档位）与 `depthFullM` 配色滑块；`depthFullM` 只保留为雨量换算标定（§5.13），放在「降雨控制」里。
 - 颜色 uniform 传 sRGB 原值，着色器内 `czm_gammaCorrect()` 转线性后再混合；`depthColorEnabled` 为 0/1 uniform（默认 1），关闭则回退原渐变。
 - 左下角 `#depthLegend` 图例由 `updateDepthLegend()` 依据 `currentDepthBands()` 实时重建；流体建立后（`finishStart()`/`restartSimulation()`）与打开分档着色时都会刷新，所以图例米数会随盒跨度变化。
-- 透明度语义（GUI「水透明度」）：滑块 **0 = 完全不透明（alpha = 1.0）**、**1 = 最透明（alpha = 0.2）**，中间线性插值：着色器里 `float waterOpacity = mix(1.0, 0.2, clamp(waterAlpha, 0.0, 1.0));`，水体 alpha 与 Fresnel/高光都乘它，避免"不透明档反而漏光"或"最透明档还留一层亮膜"。默认 0.2 对应 alpha≈0.84，与早期固定值观感一致。
+- 透明度语义（GUI「水透明度」）：滑块 **0 = 完全不透明（alpha = 1.0）**、**1 = 最透明（alpha = 0.2）**，中间线性插值：`float waterOpacity = mix(1.0, 0.2, clamp(waterAlpha, 0.0, 1.0));`。水体 alpha 的深度权重**跟着 5 档第一档走**：`float depthWeight = smoothstep(0.0, max(0.05, depthBand0), waterDepth * depthRangeM); alpha = waterOpacity * mix(0.55, 1.0, depthWeight);`——浅浅一层就有 0.55 可见度、达到第一档水深即完全不透明。之前用固定的 5% 盒高（≈ 50 m 水深才不透明）导致几十毫米降雨的水体几乎画不出来，看起来"水是空的"。Fresnel/高光也乘同一个 `waterOpacity`，避免"最透明档还留一层亮膜"。默认 0.2 对应 alpha≈0.84。
+- 降雨区填充 alpha 从 0.10 降到 **0.045**：之前那层淡蓝覆盖太像"一层透明的水"，用户会把填充误认成水体；现在它只作极轻的指示。
 
 验证：`test/verify_features2.mjs`（29 项）覆盖参考图层、图例 5 行动态文案与色块、`depthColorEnabled` → uniform 与图例联动、`depthRangeM = 盒跨度`、雨滴渲染证据；`test/verify_fixes4.mjs`（21 项）覆盖分档随盒跨度缩放、累计降雨量跨场累加、水透明度=0 时水体像素差分 0.58%（≈完全不可见）。截图 `docs/images/12_rain_effect.png`、`docs/images/13_depth_colors.png`。
 
