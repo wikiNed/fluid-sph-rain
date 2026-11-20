@@ -311,7 +311,7 @@ fluid.setRainMask(canvas) ──▶ RGBA UNSIGNED_BYTE 纹理（LINEAR/CLAMP）
 默认模式。用户不上传任何数据，直接在全球卫星地形上画多边形，`src/io/terrainSampler.js` 负责把该区域真实高程转成 SPH 需要的 1024² 灰度高度图：
 
 1. **范围来源**：多边形提交时（freeMode）由顶点经纬度 bbox 反推 `domain.extent`（十进制度），同时作为体积盒范围（与上传模式的 dem.extent 等价）。
-2. **采样策略（性能关键）**：在 bbox 内铺 `globeSampleGrid × globeSampleGrid`（默认 96，GUI 可调 32~160）个 `Cartographic` 网格点（v=0 为北，与全链路 north-up 约定一致）。
+2. **采样策略（性能关键）**：在 bbox 内铺 `globeSampleGrid × globeSampleGrid`（默认 96²，GUI 预设 96²~512²，见 §5.16）个 `Cartographic` 网格点（v=0 为北，与全链路 north-up 约定一致）。
    - 优先用 `Cesium.sampleTerrain(provider, level, positions)` 固定级别采样，级别由区域跨度自适应：`ideal = log2(360 / spanDeg) + 1.3`，clamp 到 8~15。
    - 失败才退化到 `sampleTerrainMostDetailed`。
    - **实测性能差约 70×**：固定级别 12 采样 32×32 点耗时 ~147ms，而 `sampleTerrainMostDetailed` 同样点数需 ~10231ms。这正是不能图省事直接用 mostDetailed 的原因（会卡界面 10 秒以上）。
@@ -461,6 +461,24 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 - **一键复演流程**（`index.js#runCase`）：防重入 → 关面板 → `teardownSimulation(true)` → `domainEditor._commit(domainUv)` → 轮询至 `fluid && !state.pendingDomainDem`（≤90 s）→ `regionEditor._commitRegion(rainUv)` → 写 `options.rainMode="amount"/rainAmountMm/rainDurationSec` → `fluid.resetRainAmount()` 并同步 GUI/状态栏 → `setCaseCamera()`（`sampleTerrainMostDetailed` 取地面高程 + AGL，`cancelFlight` 后 `setView`）→ `options.rainEnabled = true` + `applyRainRegions()` → 状态栏写入案例名/面积/雨量/等效雨强。
 - **测试钩子**：`__app.cases()`、`runCase(id)`、`activeCase()`、`openCases()/closeCases()`、`caseState()`、`setRainEnabled(on)`、`setRainFx(on)`。
 - **验证**：`test/verify_cases.mjs`（16 项）覆盖面板开合、卡片数量、详情内容、一键复演、模拟域/雨区面积、雨量参数与目标质量、状态栏案例名、**画面像素差分确认水确实被渲染出来**（关雨滴后取基线，注入 ≥40 mm 后对比，蓝色像素 0.23%→2.28%）、无致命错误；四案例逐一实跑 `test/probe_cases_all.mjs` 均正常建域/建雨区/注水。
+
+### 5.16 模拟精度与网格规模（采样点数 vs SPH 网格）
+
+界面里的「9216 网格点」只是**地形采样点数**，不是流体网格数；两者必须分开看，否则会误判精度。
+
+| 环节 | 网格 | 数量 | 含义 |
+| --- | --- | --- | --- |
+| 地形采样（全球模式） | `globeSampleGrid²`，默认 96² | 9,216 个采样**点** | 每个点是地表实测高程；点距 = 跨度 / (N−1) |
+| DEM 纹理 | `DEM_TEXTURE_SIZE²` = 1024² | 1,048,576 像素 | 采样点双线性插值成的灰度图（供着色器采样） |
+| SPH 流体 | `textureSize²` = 1024² | 1,048,576 个粒子格 | 实际参与压力/速度/水量计算的格子 |
+| 掩膜（域/雨区） | 1024² | 1,048,576 像素 | 与 DEM 同分辨率，按 uv 采样 |
+
+- **格距公式**：采样点距 = `Δlon·111320·cos(中纬) / (N−1)`（经向）、`Δlat·110540 / (N−1)`（纬向）；模拟格距 = 同式除以 `1024`（是"格"所以用 1024 而不是 1023）。
+- **可调范围**：GUI「地形采样精度」提供 96²(9,216) / 192²(36,864) / 256²(65,536) / 384²(147,456) / 512²(262,144) 五档；改动后需重新划定模拟域生效。实测采样耗时（ArcGIS 地形、固定 level）：96² 604 ms、160² 284 ms、256² 265 ms、384² 297 ms、512² 308 ms（瓦片缓存后差异很小）。
+- **上限说明**：512² 是采样上限——DEM 画布固定 1024²，采样点超过 1024² 已无增益；SPH 网格固定 1024²（约 104.9 万格，RTX 3080 Ti 上约 60fps），**不支持在线切换**，因为 `src/sim/shaders.js` 内 `const int textureSize = 1024;` 与纹理创建/掩膜 uniform 都按 1024 硬编码，改 2048 需要 4× 纹理内存与 4× 计算量（当前未实现）。
+- **显示位置**：①状态栏 `全球真实地形 · 36864/36864 网格点（192×192，间距 16.3×20.6 m；模拟格 3.05×3.85 m）`；②GUI 数据面板「模拟精度」只读行 `采样 192²（16.3×20.6 m/点） · 模拟 1024²（3.05×3.85 m/格） · 共 1,048,576 格`；③测试钩子 `__app.precisionInfo()` / `setSampleGrid(n)`。
+- **实现**：`src/sim/geoUtils.js#cellSizeMeters(extent,n)` 与 `precisionSummary(extent,sampleGrid,simGrid=1024)`；`index.js#onDomainCommitted` 采样后把 `sampled.gridN` 写入 `state.lastSampleGrid` 并拼进 `dem.info`。
+- **验证**：`test/verify_precision.mjs`（18 项）断言默认 96²/9,216 点、1024²/1,048,576 格、切换 192² 后点距 = 跨度/191、模拟格距 = 跨度/1024、状态栏与 GUI 文案、512² 上限可用（小范围 1.43×1.73 m/点）以及无致命错误。
 - **踩坑**：①案例面板的启动按钮必须等 `fluid` 真正建立后再提交雨区，否则 `regionEditor` 尚无域多边形会整块拒绝；②测"水是否出现"时不能读 `_simTextures`（当前 Chrome 下 float 纹理回读恒 0），改用页面内 `gl.readPixels` 抓默认帧缓冲做差分；③雨滴后处理会让全屏像素变化，差分前必须 `setRainFx(false)`。
 
 ## 6. 关键修复记录
@@ -596,6 +614,8 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 | `demo_rain_amount.mjs` | 生成雨量模式演示截图：一场 500mm/60s 的雨下完后两雨区的汇水分布与 GUI 面板（`rain_amount_wide.png`/`rain_amount_mid.png`） |
 | `demo_shuangshimen.mjs` | **甘肃渭源双石门沟“7·26”山洪复演**：全球地形定位 → 3.5×4.4 km 域 + 1.46 km² 上游雨区 → 雨量模式（50/150 mm per 60 s）→ 回读 `surfaceTexture` 统计湿面/最大水深/5 档 → 出图（`node test/demo_shuangshimen.mjs 150 60 s150`）；先例：雨区顶点必须全在域内、出图前隐藏 polygon/label、等待 `passInjection===0` 再截图（§5.14） |
 | `verify_cases.mjs` | **山洪案例库**回归（16 项）：`#btnCases` 开面板、卡片数=4、点卡片出详情、点「▶ 一键复演」进入案例模拟、面板自动关闭、域/雨区面积 >0、雨量参数与案例一致（amount/150mm/60s）、目标质量 >0、状态栏含案例名、注入推进 ≥40mm、**关雨滴后画面像素差分确认水面出现**（蓝色像素 0.23%→2.28%）、无致命错误（§5.15） |
+| `verify_precision.mjs` | **模拟精度**回归（18 项）：默认 96²=9,216 采样点、模拟 1024²=1,048,576 格、GUI「地形采样精度/模拟精度」控件存在、切 192² 后点距=跨度/191、模拟格距=跨度/1024、状态栏与精度文本含点数/间距、512² 上限（小范围 1.43×1.73 m/点）、无致命错误（§5.16） |
+| `probe_precision.mjs` / `probe_sample_cost.mjs` | 精度探针：前者设采样网格后划域读回 `precisionInfo()`/状态栏；后者实测 96²/160²/256²/384²/512² 的地形采样耗时（§5.16） |
 | `probe_cases_geo.mjs` / `probe_cases_terrain.mjs` | 案例静态几何校验（雨区顶点是否都在域内、面积）与地形采样校验（高程范围/起伏/机位地面高程 + 截图） |
 | `probe_cases_all.mjs` | 四案例逐一实跑：建域/雨区/注水/机位截图 `case_run_<id>.png`，确认 `rainTotalKm2>0`、`targetMass>0` |
 | `probe_datong_area.mjs` | 大通案例候选范围地形起伏对比（5 个 extent 的 min/max/relief），用于把案例坐标调到起伏最明显的沟谷 |
@@ -629,7 +649,7 @@ chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<dir> `
 | `heightScale` | shaders.js | **必须=0.25** | 约束：`DEM编码倍率(4.0) × heightScale = 1`，否则水体沉入/浮出地形 |
 | `waterAddRate` | GUI | 0.001~0.1 | 仅点源注水（需勾选 pointSource） |
 | `depth` | GUI | 50~500 | 体积渲染光线步进次数（质量/性能权衡） |
-| `globeSampleGrid` | options / GUI「地形采样精度」 | 32~160（默认96） | 全球模式采样网格边长。越大地形越精细但采样/插值越慢；山区建议 ≥64 |
+| `globeSampleGrid` | options / GUI「地形采样精度」 | 96（预设 96/192/256/384/512） | 全球模式采样网格边长（点数）。点距 = 跨度/(N−1)；越大地形越精细但采样越慢。DEM 与 SPH 网格固定 1024²（§5.16） |
 | `reliefMeters` | GUI | 50~3000（默认600） | 上传无参考图片时体积盒竖直厚度 |
 | `depthFullM` | GUI「5档水深配色」 | 5~200（默认40） | **满档水深标定值**：`depth_m = waterDepth(占盒比例) × depthFullM`。只影响配色/图例，不影响物理；调小让深水更快变红，调大让画面更偏冷色（§5.11） |
 | `depthColorEnabled` | GUI | 0/1（默认1） | 5 档水深配色开关；关闭回退原「浅水→深水」渐变并隐藏图例 |

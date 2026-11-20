@@ -23,6 +23,8 @@ import {
   extentIsValid,
   extentAreaLabel,
   areaLabel,
+  cellSizeMeters,
+  precisionSummary,
 } from "./src/sim/geoUtils.js";
 
 // 当前代码来自[少年啦1997]的开源代码，如果你是购买源码，请联系商家进行退款
@@ -127,7 +129,7 @@ const options = {
   // —— 新增：数据放置 ——
   placementWidthKm: 10.0, // 无地理参考图片的手动放置宽度
   reliefMeters: 600, // 无地理参考图片的地形起伏跨度(米)，盒子将贴合真实地表
-  globeSampleGrid: 96, // 全球地形模式的采样网格边长（越大越精细但越慢，32~160）
+  globeSampleGrid: 96, // 全球地形模式的采样网格边长（越大越精细但越慢，预设 96~512）
 
   // —— 新增：降雨控制 ——
   rainEnabled: false, // 降雨总开关
@@ -179,6 +181,8 @@ const state = {
   /** @type {[number,number,number,number]|null} 当前模拟范围 [minLon,minLat,maxLon,maxLat] */
   extent: null,
   demInfo: "尚未加载数据",
+  /** 最近一次全球地形采样用的网格边长（用于精度显示） */
+  lastSampleGrid: 0,
   /** 等待手动放置中心点的数据包 */
   pendingPlaceDem: null,
   /** 已解析但等待划定模拟域的数据包 */
@@ -729,6 +733,10 @@ async function onDomainCommitted(domain) {
         options.globeSampleGrid,
       );
       const rect = Cesium.Rectangle.fromDegrees(...extent);
+      const cell = cellSizeMeters(extent, sampled.gridN);
+      const simCell = cellSizeMeters(extent, 1024);
+      state.lastSampleGrid = sampled.gridN;
+      const fmtM = (v) => (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
       dem = {
         kind: "globe",
         sourceName: "全球地形采样",
@@ -737,7 +745,7 @@ async function onDomainCommitted(domain) {
         maxElevation: sampled.maxElevation,
         extent: [...extent],
         contentAspect: (Math.cos(Cesium.Math.toRadians((extent[1] + extent[3]) / 2)) * (extent[2] - extent[0])) / (extent[3] - extent[1]),
-        info: `全球真实地形 · ${sampled.valid}/${sampled.samples} 网格点${sampled.flat ? " · 区域较平坦" : ""}`,
+        info: `全球真实地形 · ${sampled.valid}/${sampled.samples} 网格点（${sampled.gridN}×${sampled.gridN}，间距 ${fmtM(cell.x)}×${fmtM(cell.y)} m；模拟格 ${fmtM(simCell.x)}×${fmtM(simCell.y)} m）${sampled.flat ? " · 区域较平坦" : ""}`,
       };
       addRangeOutline(rect, dem);
       // 飞到所画区域（留出边距，带俯角，便于观察地表汇流）
@@ -1354,6 +1362,8 @@ let regionGuiFolder;
 let regionControllers = {}; // id -> {folder, ctrls}
 /** 降雨模式相关的 GUI 控制器（用于按模式显示/隐藏雨强与雨量控件） */
 let rainGuiCtrls = null;
+/** 地形采样精度下拉框控制器（供测试钩子同步显示） */
+let sampleGridCtrl = null;
 const rainProgress = { injected: "0.000", mm: "—", rate: "—" };
 
 function buildGui() {
@@ -1389,14 +1399,32 @@ function buildGui() {
         setStatus("调整了地形起伏跨度：重新点击底图设置中心点即可生效");
       }
     });
-  fData
-    .add(options, "globeSampleGrid", 32, 160, 8)
+  const samplePresets = {
+    "96²（9,216 点 · 快速）": 96,
+    "192²（36,864 点 · 精细）": 192,
+    "256²（65,536 点 · 高）": 256,
+    "384²（147,456 点 · 很高）": 384,
+    "512²（262,144 点 · 最高）": 512,
+  };
+  sampleGridCtrl = fData
+    .add(options, "globeSampleGrid", samplePresets)
     .name("地形采样精度")
     .onChange(() => {
       if (state.sourceMode === "globe") {
         setStatus("调整了地形采样精度：重新划定模拟域即可生效");
       }
     });
+  const precisionLabel = { 精度: "" };
+  fData.add(precisionLabel, "精度").name("模拟精度").listen();
+  Object.defineProperty(precisionLabel, "精度", {
+    get: () => {
+      const ext = state.currentDem?.extent;
+      if (!ext || !extentIsValid(ext)) {
+        return `未划定模拟域（默认 ${options.globeSampleGrid}² 采样 / 1024² 模拟 = 1,048,576 格）`;
+      }
+      return `${precisionSummary(ext, state.lastSampleGrid || options.globeSampleGrid, 1024)} · 共 1,048,576 格`;
+    },
+  });
   const demLabel = { 信息: "尚未加载" };
   fData.add(demLabel, "信息").listen();
   Object.defineProperty(demLabel, "信息", {
@@ -2373,6 +2401,29 @@ window.__app = {
     syncDepthColorUniforms();
     updateDepthLegend();
     return this.depthConfig();
+  },
+  /** 精度信息（测试/展示用）：采样网格点数与格距、SPH 模拟网格规模 */
+  precisionInfo() {
+    const extent = state.currentDem?.extent ?? state.extent;
+    const sampleGrid = state.lastSampleGrid || options.globeSampleGrid;
+    const simGrid = 1024;
+    return {
+      sampleGrid,
+      samples: sampleGrid * sampleGrid,
+      sampleSpacing: extent ? cellSizeMeters(extent, sampleGrid) : { x: 0, y: 0 },
+      simGrid,
+      simCells: simGrid * simGrid,
+      simSpacing: extent ? cellSizeMeters(extent, simGrid) : { x: 0, y: 0 },
+      extent: extent ? [...extent] : null,
+      text: extent ? precisionSummary(extent, sampleGrid, simGrid) : "未划定模拟域",
+    };
+  },
+  /** 测试钩子：设置下一次全球地形采样的网格边长后重新划域生效 */
+  setSampleGrid(n) {
+    const v = Math.min(512, Math.max(32, Math.round(Number(n) || 96)));
+    options.globeSampleGrid = v;
+    sampleGridCtrl?.updateDisplay?.();
+    return { requestedGrid: v, requestedSamples: v * v, current: this.precisionInfo() };
   },
   /** 降雨模式状态（测试用）：模式/设定雨量/历时/换算率；amount 模式下附带已注入雨量等统计 */
   rainfallConfig() {

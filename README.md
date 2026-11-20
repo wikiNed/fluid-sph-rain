@@ -102,6 +102,13 @@
 - 数据定义在 `src/data/cases.js`（`extent`/`domainUv`/`rainUv`/`mm`/`dur`/`camera`），新增案例只需追加一条配置；坐标均为按公开报道与地形探针确定的沟谷一带，属**示意性复演**（非官方灾点精确坐标），雨量为情景假设，用于比较不同量级的淹没形态差异。
 - 回归：`test/verify_cases.mjs`（16 项，含面板/卡片/详情/一键复演/域与雨区/雨量参数/画面水色差分）；四案例逐一实跑脚本 `test/probe_cases_all.mjs`。
 
+### 11. 模拟精度：9216 网格点到底多大？
+- 状态栏里的「9,216 网格点」是**地形采样点数**（96×96 个地表高程点），不是流体网格数。每个点的地面间距 = 范围跨度 / (96−1)；例如 3.4×3.6 km 的沟谷约 **37×46 m/点**。
+- 流体模拟网格固定 **1024×1024 = 1,048,576 个粒子格**（不是 9,216）：同一范围下约 **3.4×4.3 m/格**，才是真正的水流分辨率。DEM 纹理与掩膜也都是 1024²。
+- GUI「数据 → 地形采样精度」提供 **96²(9,216) / 192²(36,864) / 256²(65,536) / 384²(147,456) / 512²(262,144)** 五档（改动后重新划域生效），旁边「模拟精度」只读行实时显示 `采样 192²（16.3×20.6 m/点）· 模拟 1024²（3.05×3.85 m/格）`。
+- 上限：采样最高 **512² = 262,144 点**（DEM 画布只有 1024²，再高无增益）；SPH 网格固定 1024²，暂不支持 2048²（需 4× 显存与 4× 计算量，着色器常量按 1024 硬编码）。
+- 回归：`test/verify_precision.mjs`（18 项）；采样耗时基准 `test/probe_sample_cost.mjs`。
+
 ## 运行
 
 ```bash
@@ -122,7 +129,7 @@ npx http-server -p 8080          # 或 python -m http.server
 index.html                     工具栏 / 状态栏 / GUI 宿主
 index.js                       主控：数据流、放置流程、三段式模拟生命周期、GUI
 src/sim/shaders.js             SPH 着色器（含 rainMask 降雨注入 + domainMask 域约束）
-src/sim/geoUtils.js            经纬度 ⇄ 纹理UV ⇄ 画布像素 换算 + 球面多边形面积（polygonAreaKm2/areaLabel）
+src/sim/geoUtils.js            经纬度 ⇄ 纹理UV ⇄ 画布像素 换算 + 球面多边形面积 + 采样/模拟格距（cellSizeMeters/precisionSummary）
 src/sim/rainMask.js            雨区多边形 → 降雨掩膜画布（lighten 合成）
 src/sim/domainMask.js          模拟域多边形 → 域掩膜画布 + pointInPolygon 顶点校验
 src/io/elevationLoader.js      GeoTIFF/普通图片解析与覆盖范围自动分析

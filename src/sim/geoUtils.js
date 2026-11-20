@@ -122,6 +122,38 @@ export function polygonAreaKm2(points) {
 }
 
 /**
+ * 采样网格的实际地面格距（米）。
+ *
+ * 采样点是网格的"点"而不是"格"：n×n 个点覆盖整个 extent，因此相邻点间距 = 跨度 / (n-1)。
+ * 经度方向按中纬度余弦收缩，纬度方向用固定的每度米数。
+ *
+ * @param {ExtentDeg} extent 经纬度范围
+ * @param {number} n 网格边长（采样点数）
+ * @returns {{x:number,y:number}} 经/纬方向格距（米）
+ */
+export function cellSizeMeters(extent, n) {
+  if (!extentIsValid(extent) || !(n > 1)) return { x: 0, y: 0 };
+  const latMid = Cesium.Math.toRadians((extent[1] + extent[3]) / 2);
+  const widthM = (extent[2] - extent[0]) * 111320 * Math.cos(latMid);
+  const heightM = (extent[3] - extent[1]) * 110540;
+  return { x: widthM / (n - 1), y: heightM / (n - 1) };
+}
+
+/**
+ * 精度摘要文本：采样网格格距 + SPH 模拟网格格距。
+ * @param {ExtentDeg} extent
+ * @param {number} sampleGrid 地形采样网格边长（点）
+ * @param {number} simGrid SPH 模拟网格边长（1024）
+ */
+export function precisionSummary(extent, sampleGrid, simGrid = 1024) {
+  if (!extentIsValid(extent)) return "未划定模拟域";
+  const s = cellSizeMeters(extent, sampleGrid);
+  const c = cellSizeMeters(extent, simGrid);
+  const fmt = (v) => (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+  return `采样 ${sampleGrid}²（${fmt(s.x)}×${fmt(s.y)} m/点）· 模拟 ${simGrid}²（${fmt(c.x)}×${fmt(c.y)} m/格）`;
+}
+
+/**
  * 面积文本（不含"面积"前缀）：小于 1 km² 时同时给出 m² 与 km² 便于判读。
  */
 export function areaLabel(km2) {
