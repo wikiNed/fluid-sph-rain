@@ -1,4 +1,4 @@
-﻿# fluid-sph-rain 开发文档
+# fluid-sph-rain 开发文档
 
 > 基于 [少年啦1997] 的开源项目 [fluid-sph](https://github.com/shaonianla1997/fluid-sph)（Cesium SPH 地形流体模拟）的增强开发版。
 > 本文档面向后续开发者，完整记录功能实现、架构设计、关键技术决策、修复过程与测试体系。
@@ -108,6 +108,12 @@
 **雨量模式：一场 500mm / 60s 的降雨下完后，雨区与下游汇水（浅蓝=0–2m 真实水深）**：
 
 ![雨量模式](docs/images/15_rain_amount.png)
+
+**案例复演：甘肃渭源双石门沟“7·26”山洪（50 mm 预警量级 vs 150 mm 局地强暴雨，详见 [docs/ANALYSIS_shuangshimen.md](docs/ANALYSIS_shuangshimen.md)）**：
+
+![双石门 50mm](docs/images/16_shuangshimen_50mm.png)
+
+![双石门 150mm](docs/images/17_shuangshimen_150mm.png)
 
 ## 3. 快速开始
 
@@ -422,6 +428,23 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 - **GUI 按模式显隐的坑（dat.GUI）**：`controller.domElement` 是控件容器 `div.c`（滑块/下拉本体），不是占一行的 `li.cr`。只把 `domElement.style.display` 设为 none 会**留下空行**（标签还在、行高不变），必须 `domElement.closest("li.cr")` 整行隐藏；验证时也不能只看 `domElement`，要用整行的 `getComputedStyle` 或「面板高度变化」（实测强度模式 222px / 雨量模式 361px）。
 - 验证：`test/verify_rainfall.mjs`（35 项）覆盖配置换算、注入推进与自动停止、回读水量量级、100mm vs 1000mm 质量比 ≈10、重置归零、切回强度模式、GUI 整行显隐与面板高度变化、5 档图例与无致命错误，ALL PASS。演示图 `docs/images/15_rain_amount.png`（出图脚本 `test/demo_rain_amount.mjs`）。
 
+### 5.14 案例复演：甘肃渭源双石门沟“7·26”山洪
+
+用全球真实地形 + 雨量模式做机制性复演，验证「上游广域汇水 + 下游狭口束水」地形在不同雨量下的响应差异。完整报告见 **[docs/ANALYSIS_shuangshimen.md](docs/ANALYSIS_shuangshimen.md)**。
+
+- **灾点定位**：会川镇（104.01279°E, 35.03096°N）以南 10 km；实机探针在 `103.995°E, 34.945°N` 一带看到「黄香沟」注记 + G212 + 白色辫状河床 + V 型谷，确认可复演沟段，地面高程 2986~3279 m。
+- **模型设置**：`test/demo_shuangshimen.mjs`，`EXTENT=[103.978,34.923,104.016,34.963]`（3.5×4.4 km，10.52 km²，高程 2629~3701 m），域多边形 6 顶点（`commitGlobeDomain(extent, vertices)`，v=0 为北），上游雨区 1.46 km²（域内约 14%），雨量模式 50 mm / 60 s 与 150 mm / 60 s（时间压缩后的等效雨强 3000 / 9000 mm/h）。
+- **结果对比**（回读 `surfaceTexture`，`depthFullM=40`）：
+
+  | 情景 | 湿面占比 | 平均水深 | 最大水深 | 形态 |
+  | --- | --- | --- | --- | --- |
+  | 50 mm | 5.0% | 0.11 m | 0.62 m | 仅树枝状沟道内汇流，未漫滩 |
+  | 150 mm | 9.0% | 0.20 m | 1.17 m | 沟道漫溢 + 坡脚片流 + 沟口淹没扇 |
+
+  雨量增至约 3 倍时湿面 1.8×、最大水深 1.9×，且**形态发生质变**（线状沟道 → 面状淹没），正对应露营地所在的河漫滩被整体淹没。
+- **脚本要点**：①雨区顶点必须严格在模拟域内，否则 `RainRegionEditor` 整块拒绝、`_rainMaskLive` 为 null，雨量模式判定无雨区而不注水（首跑即踩此坑，雨区内缩后才通）；②出图前遍历 `viewer.entities` 把 `e.polygon.show`/`e.label.show` 置 false，去掉半透明填充蒙版与标签，只留描边与图例；③页面被遮挡时 rAF 暂停导致仿真时间落后于墙钟，**必须轮询 `rainfallConfig().stats` 直到 `passInjection===0`** 再截图，不能用固定 `sleep`。
+- 图：`docs/images/16_shuangshimen_50mm.png`、`docs/images/17_shuangshimen_150mm.png`。
+
 ## 6. 关键修复记录
 
 五个踩坑极深的 bug + 一个状态栏覆盖问题，记录根因与验证方法，避免后续重蹈（§6.4/§6.5 为模拟域改造新增，§6.6 为真机 GPU 着色器编译失败）：
@@ -553,6 +576,7 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 | `probe_tiles_zh2.mjs` / `probe_tiles_zh3.mjs` | 中文瓦片源探测（页面内 fetch + `createImageBitmap` 统计透明像素）：确认高德 `webst0{s}...style=8&scl=1` 为透明叠加层（不透明像素 8.1%），天地图/Esri/OSM 在当时网络下不可达 |
 | `verify_rainfall.mjs` | **雨量模式（按实际降雨量模拟）**回归（35 项）：默认配置与 `massPerMm=1e-4`、等效雨强换算、100mm/10s 注入推进→自动停止且已降雨量 100.000mm、回读 `surfaceTexture` 水体量级合理、1000mm/10s 注满且与 100mm 水体总质量比 10.36≈10、重置后水量/雨量归零、切回强度模式仍按 0.0004 注入、5 档图例、无致命错误（§5.13） |
 | `demo_rain_amount.mjs` | 生成雨量模式演示截图：一场 500mm/60s 的雨下完后两雨区的汇水分布与 GUI 面板（`rain_amount_wide.png`/`rain_amount_mid.png`） |
+| `demo_shuangshimen.mjs` | **甘肃渭源双石门沟“7·26”山洪复演**：全球地形定位 → 3.5×4.4 km 域 + 1.46 km² 上游雨区 → 雨量模式（50/150 mm per 60 s）→ 回读 `surfaceTexture` 统计湿面/最大水深/5 档 → 出图（`node test/demo_shuangshimen.mjs 150 60 s150`）；先例：雨区顶点必须全在域内、出图前隐藏 polygon/label、等待 `passInjection===0` 再截图（§5.14） |
 
 **断言清单**：页面 ready → Viewer 创建 → **默认全球模式（无 DEM/无流体、btnGlobe 存在、划域按钮可用）** → **全球模式画多边形→采样真实地形→生成域掩膜+域约束+流体启动（"🌊 模拟进行中"、sourceMode=globe、bbox=多边形范围）** → 无着色器错误 → **域外雨区被拒绝、域内雨区成功 + 掩膜生成** → 注入持续累加 → 全域降雨开关 → 停止后注入冻结 → GeoTIFF 自动解析 bbox 后划域 → **UTM 投影换算为同区域经纬度**后划域 → PNG 触发手动放置 → 放置范围按宽度与纬度缩放正确后划域 → 无致命控制台错误。
 

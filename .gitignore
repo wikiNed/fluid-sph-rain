@@ -37,3 +37,4 @@ test/tile*.png
 test/check_page.png
 test/*.json
 !test/package.json
+test/smsm_*.png

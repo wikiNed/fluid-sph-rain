@@ -2119,6 +2119,11 @@ window.__app = {
     if (fluid) fluid.resetRainAmount();
     rainProgress.mm = "0.0";
     rainProgress.rate = rainAmountRateMmH().toFixed(0);
+    // 同步 GUI 控件显示值（否则状态栏显示 150mm、滑块仍停在旧值，容易误解）
+    rainGuiCtrls?.mode?.updateDisplay?.();
+    rainGuiCtrls?.amount?.updateDisplay?.();
+    rainGuiCtrls?.duration?.updateDisplay?.();
+    rainGuiCtrls?.preset?.updateDisplay?.();
     syncRainModeGui();
     refreshRainSummary();
     return this.rainfallConfig();
