@@ -448,118 +448,66 @@ vec4 Render(in vec3 ro, in vec3 rd) {
 
    ret.x = max(ret.x, 0.0);
 
-    // 光线步进找地形
+    // 光线步进找地形（沿射线逐步逼近地面）
        float tt = ret.x;
+       float tPrev = ret.x;
        for (int i = 0; i < depth; i++) {
           vec3 p = ro + rd * tt;
           float h = p.y - getHeight(p).x;
           if (h < 0.0002 || tt > ret.y)
           break;
+          tPrev = tt;
           tt += h * 0.4;
         }
 
-    // 光线步进找水面
-       float wt = ret.x;
-           for (int i = 0; i < depth; i++) {
-               vec3 p = ro + rd * wt;
-               float h = p.y - getHeight(p).y;
-               if (h < 0.0002 || wt > min(tt, ret.y))
-               break;
-               wt += h * 0.4;
-           }
+       // 二分细化：h*0.4 是粗迭代，交点误差会让贴地的水膜抖动、
+       // 在屏幕上形成点阵/网纹（看着像"贴花画坏了"）。这里再二分 5 次，
+       // 把交点误差压到步长的 1/32 以内。
+       for (int i = 0; i < 5; i++) {
+          float tm = 0.5 * (tPrev + tt);
+          vec3 pm = ro + rd * tm;
+          float hm = pm.y - getHeight(pm).x;
+          if (hm > 0.0) tPrev = tm; else tt = tm;
+       }
 
     vec3 tc = vec3(0.0);
     float alpha = 0.0;
 
-    // 相机进入体积盒内部时渲染阶段会关闭深度测试（盒内所有面被背面剔除，
-    // 详见 FluidPipelineStages.js volumeInsideRenderState），遮挡完全由这里判断：
-    // 水面必须在「地形命中点」之前才算可见，否则丢弃，避免把山后的水画到山前。
-    if (wt < min(tt, ret.y)) {
-        vec3 waterPos = ro + rd * wt;
-        float waterDepth = getWaterDepth(waterPos);
-
-        if (waterDepth > 0.001) {
-            vec3 waterNormal = getNormal(waterPos, 1);
-
-            // Fresnel反射
-            float F = fresnel(rayDir, waterNormal);
-
-            // 反射方向
-            vec3 reflectDir = reflect(rayDir, waterNormal);
-
-            // GUI 和常量颜色均为 sRGB；Cesium HDR 光照需要在线性空间中计算
-            vec3 skyColor = mix(
-                czm_gammaCorrect(vec3(0.5, 0.7, 1.0)),
-                czm_gammaCorrect(vec3(0.2, 0.4, 0.8)),
-                reflectDir.y * 0.5 + 0.5
-            );
-
-            // 水下颜色衰减
-            float underwaterDist = min(tt - wt, 0.3);
-            vec3 underwaterColor = exp(-0.18 * vec3(1.0, 0.467, 0.180) * max(underwaterDist * 100.0, 0.0));
-
-            // 基础水颜色（将 GUI 的 sRGB 颜色转为线性颜色后再按深度混合）
-            vec3 waterColor = mix(
-                czm_gammaCorrect(shallow),
-                czm_gammaCorrect(deep),
-                smoothstep(0.0, 0.1, waterDepth)
-            );
-
-            // 5 档水深配色：waterDepth 是“占体积盒高度的归一化比例”，
-            // 乘以「满档水深」标定值 depthRangeM（米，默认 40，可调）得到图例米数。
-            // 注意不能用体积盒真实跨度（高程差常见上千公里级），否则几秒内
-            // 全部落进 >20m 红色档，五档配色失去区分度（见开发记录 §5.10）。
-            // 用 clamp 出的 0/1 系数做 mix，避免 uniform 分支被 ANGLE 编译成非法 HLSL。
-            float depthColorMix = clamp(depthColorEnabled, 0.0, 1.0);
-            waterColor = mix(
-                waterColor,
-                depthRamp(waterDepth * depthRangeM),
-                depthColorMix
-            );
-
-            // 高光
-            float spec = pow(max(dot(lightDir, reflectDir), 0.0), 64.0);
-
-            // 混合基础水色和天空反射
-            tc = mix(waterColor * underwaterColor, skyColor, F * 0.5);
-            tc += spec * vec3(1.0) * 0.8;
-
-            // 透明度：GUI「水透明度」滑块 0 → 完全不透明（alpha=1），
-            // 1 → 最透明（alpha=0.2），中间线性插值。
-            // 深度权重不能再用固定的 5% 盒高（那是几十米水深才完全不透明的门槛），
-            // 改为跟着 5 档配色第一档（depthBand0，单位米）走：
-            // 浅浅一层水就有 0.3 的底噪可见度，达到第一档水深即完全不透明。
-            // Fresnel/高光也用同一个 waterOpacity 缩放，避免“不透明”时反而漏光、
-            // 或“最透明”时高光仍在水面上留一层亮膜。
-            float waterOpacity = mix(1.0, 0.2, clamp(waterAlpha, 0.0, 1.0));
-            float waterMeters = waterDepth * max(1.0, depthRangeM);
-            float depthWeight = smoothstep(0.0, max(0.05, depthBand0), waterMeters);
-            alpha = waterOpacity * mix(0.55, 1.0, depthWeight);
-            alpha = clamp(alpha + waterOpacity * (F * 0.3 + spec * 0.5), 0.0, 1.0);
-        }
-    }
-
-    // 薄层水（厘米级）：体积盒高差上千米时，水面只比地形高几厘米，
-    // 光线步进的步长是米级，根本打不到水面 → 看起来“没有水”。
-    // 这类水不画立体水面，而是直接在地形命中点叠一层「按真实水深着色的湿膜」：
-    // 范围与深浅都是真实值（颜色来自 5 档配色），只是不再有几何厚度。
-    if (alpha < 0.01 && tt < ret.y && ret.x <= tt) {
+    // 水体渲染策略：只在「地形命中点」绘制湿膜，不再沿射线找水面。
+    //
+    // 为什么不再找水面：体积盒里的地形是 1024² 的平滑高度场，与 Cesium
+    // 真实地形存在米级差异；薄层水（真实雨量下常只有几厘米）的水面几乎
+    // 贴着平滑地形，光线步进步长又是米级，于是要么错过水面、要么打在
+    // “平滑地形近似面”上方，屏幕上就出现大片悬空、随视角游动的贴花。
+    // 而按地形命中点取水深只依赖同一套平滑场做地形求交，误差退化为像素级
+    // 位移，不会再产生悬空面；水体颜色/透明度仍按真实水深（米）取值。
+    if (tt < ret.y && ret.x <= tt) {
         vec3 groundPos = ro + rd * tt;
         float filmMeters = getWaterDepth(groundPos) * max(1.0, depthRangeM);
         if (filmMeters > 0.0002) {
-            float filmOpacity = mix(1.0, 0.2, clamp(waterAlpha, 0.0, 1.0));
-            float w = smoothstep(0.0, max(0.05, depthBand0), filmMeters);
+            float waterOpacity = mix(1.0, 0.2, clamp(waterAlpha, 0.0, 1.0));
+
+            // 坡面水膜：陡坡上的水会流走，不该显示成整片蓝色覆盖，
+            // 否则整面山坡都像被贴了一层蓝色贴花。这里用地形法线的
+            // 竖直分量（flatness）压暗陡坡、保留沟底/洼地的积水观感。
+            float e = 2.0 / float(textureSize);
+            float h0 = getHeight(groundPos).x;
+            float hx = getHeight(groundPos + vec3(e, 0.0, 0.0)).x;
+            float hz = getHeight(groundPos + vec3(0.0, 0.0, e)).x;
+            vec3 nrm = normalize(vec3(-(hx - h0) / e, 1.0, -(hz - h0) / e));
+            float flatness = smoothstep(0.55, 0.90, nrm.y);
+
             tc = depthRamp(filmMeters);
-            alpha = filmOpacity * mix(0.25, 0.85, w);
+            // 透明度用平滑曲线（不要再用 5 档分界做跃变），否则水面会出现
+            // 一圈圈等高线似的“阶梯”，看着像贴图画坏了。
+            float vis = smoothstep(0.0, max(0.001, depthBand1), filmMeters);
+            alpha = waterOpacity * mix(0.30, 0.95, vis) * mix(0.10, 1.0, flatness);
         }
     }
 
-    // 如果没有水但有地形
-    if (alpha < 0.01 && tt < ret.y) {
-        discard;
-    }
+    if (alpha < 0.01) discard;
 
-       return vec4(tc, alpha);
+    return vec4(tc, alpha);
 }
 
 void main() {

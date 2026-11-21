@@ -94,11 +94,13 @@ const depthColorOptions = {
  * 5 档水深按「体积盒高度的百分比」分界（而不是固定米数）。
  * 水深着色与水体几何高度必须用同一把尺子：着色器里 waterDepth 是占体积盒高度的
  * 归一化比例，再乘以体积盒真实跨度得到米数，才能与眼睛里看到的水深一致。
- * 取 0.2% / 0.5% / 1% / 2%：在常见的 1000 m 级山区体积盒上正好是 2/5/10/20 m
- * （符合直觉的米制刻度），换到起伏 200 m 的小流域会自动缩到 0.5/1/2.4/4.7 m。
- * 若用固定米数，山区积水几十米会一直停在第一、二档，看起来“水很深、颜色却很浅”。
+ * 取 0.01% / 0.04% / 0.1% / 0.3%：1000 m 级山区体积盒上约 0.1 / 0.4 / 1.1 / 3.2 m，
+ * 正好覆盖「几厘米面流 → 半米沟道积水 → 米级漫滩 → 数米深槽」的真实山洪水深范围；
+ * 换到起伏 235 m 的小流域自动缩到 0.024 / 0.09 / 0.24 / 0.71 m。
+ * 早期用过 0.2%/0.5%/1%/2%（≈2/5/10/20 m），真实雨量下（50 mm 只有 5 cm）所有水
+ * 都挤在第一档，看起来“有水但永远浅蓝”。
  */
-const DEPTH_BAND_FRACS = [0.002, 0.005, 0.01, 0.02];
+const DEPTH_BAND_FRACS = [0.0001, 0.0004, 0.001, 0.003];
 
 /** 当前体积盒高程跨度（米），用于把水深比例换算成米 */
 function currentBoxThicknessM() {
@@ -111,10 +113,10 @@ function currentBoxThicknessM() {
   return 1000;
 }
 
-/** 当前 5 档分界（米）：随体积盒高程跨度自动缩放 */
+/** 当前 5 档分界（米）：随体积盒高程跨度自动缩放，保留 3 位小数以适配厘米级水深 */
 function currentDepthBands() {
   const thick = currentBoxThicknessM();
-  return DEPTH_BAND_FRACS.map((f) => Math.max(0.5, +(f * thick).toFixed(1)));
+  return DEPTH_BAND_FRACS.map((f) => Math.max(0.02, +(f * thick).toFixed(3)));
 }
 
 /** 传给着色器的 vec3 uniform（sRGB 原值，着色器里再 gammaCorrect） */
@@ -1686,7 +1688,7 @@ function updateDepthLegend() {
   const fmt = (v) =>
     Math.abs(v - Math.round(v)) < 0.01
       ? String(Math.round(v))
-      : String(+v.toFixed(1));
+      : String(+v.toFixed(v < 1 ? 2 : 1));
   box.innerHTML = colors
     .map((css, i) => {
       const text =

@@ -240,7 +240,7 @@ export class RainRegionEditor {
             Cesium.Cartesian3.fromRadians(c.longitude, c.latitude),
           ),
         ),
-        material: color.withAlpha(0.045),
+        material: color.withAlpha(0.0),
         // 不指定 height 时 Cesium 自动以 GroundPrimitive 贴合真实地形。
         // 填充只作极轻的指示（0.045），否则一层淡蓝覆盖会被误认成“透明的体水”
       },

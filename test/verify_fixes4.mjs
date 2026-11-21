@@ -3,7 +3,7 @@
  *
  * 覆盖：
  *  A. GUI 精简：删除「浅水颜色 / 深水颜色」，降雨区「累计降雨量(mm)」替代「累计注入量」
- *  B. 水深分档与图例：分界随体积盒跨度自动缩放（0.2%/0.5%/1%/2%），不再有可拖坏的分界滑块
+ *  B. 水深分档与图例：分界随体积盒跨度自动缩放（0.01%/0.04%/0.1%/0.3%），不再有可拖坏的分界滑块
  *  C. 累计降雨量跨多场累加（100mm + 200mm → ≈300mm），单场统计仍按本场重置
  *  D. 水透明度=0 时水体彻底不可见（屏幕抓帧差分 ≈0），且 Fresnel/高光不再残留
  *
@@ -138,18 +138,19 @@ async function main() {
     /* ---------- B. 分档随体积盒跨度缩放 ---------- */
     const dc = await page.evaluate(() => window.__app.depthConfig());
     const thick = dc.boxThicknessM;
-    const expBands = dc.bandFracs.map((f) => Math.max(0.5, +(f * thick).toFixed(1)));
+    const expBands = dc.bandFracs.map((f) => Math.max(0.02, +(f * thick).toFixed(3)));
     check("体积盒跨度 > 0 且来自当前流体", thick > 0, `box=${thick}`);
     check(
-      "5 档分界 = 跨度 × (0.2%/0.5%/1%/2%) 自动缩放",
-      dc.bands.every((b, i) => Math.abs(b - expBands[i]) < 0.11),
+      "5 档分界 = 跨度 × (0.01%/0.04%/0.1%/0.3%) 自动缩放",
+      dc.bands.every((b, i) => Math.abs(b - expBands[i]) < 0.011),
       `bands=${JSON.stringify(dc.bands)} exp=${JSON.stringify(expBands)}`,
     );
-    check("跨度≈235 m 时首档 ≈0.5 m", Math.abs(dc.bands[0] - 0.5) < 0.11, `b0=${dc.bands[0]}`);
+    check("跨度≈235 m 时首档 ≈0.024 m（厘米级）", Math.abs(dc.bands[0] - 0.024) < 0.005, `b0=${dc.bands[0]}`);
     const legendText = await page.evaluate(() =>
       [...document.querySelectorAll("#depthLegend .dl-text")].map((e) => e.textContent.trim()),
     );
-    const fmt = (v) => (Math.abs(v - Math.round(v)) < 0.01 ? String(Math.round(v)) : String(+v.toFixed(1)));
+    const fmt = (v) =>
+      Math.abs(v - Math.round(v)) < 0.01 ? String(Math.round(v)) : String(+v.toFixed(v < 1 ? 2 : 1));
     const expText = [0, ...dc.bands];
     const expect = [0, 1, 2, 3, 4].map((i) =>
       i === 4 ? `> ${fmt(expText[4])} m` : `${fmt(expText[i])} – ${fmt(expText[i + 1])} m`,

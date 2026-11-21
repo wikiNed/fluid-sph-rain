@@ -75,10 +75,11 @@ check("重新开启「道路网」后 show=true", ref2.layers.find((l) => l.key 
 const dc = await page.evaluate(() => window.__app.depthConfig());
 check("水深分档着色默认开启", dc.enabled === true);
 check(
-  "4 个分界值按体积盒跨度自动缩放（2%/5%/10%/20%）",
+  "4 个分界值按体积盒跨度自动缩放（0.01%/0.04%/0.1%/0.3%）",
   Array.isArray(dc.bands) &&
     dc.bands.length === 4 &&
-    dc.bands.every((b, i) => Math.abs(b - Math.max(0.5, +(dc.bandFracs[i] * dc.boxThicknessM).toFixed(1))) < 0.11),
+    JSON.stringify(dc.bandFracs) === JSON.stringify([0.0001, 0.0004, 0.001, 0.003]) &&
+    dc.bands.every((b, i) => Math.abs(b - Math.max(0.02, +(dc.bandFracs[i] * dc.boxThicknessM).toFixed(3))) < 0.011),
   `bands=${JSON.stringify(dc.bands)} box=${dc.boxThicknessM}`,
 );
 check("5 档颜色已定义", Array.isArray(dc.colors) && dc.colors.length === 5, JSON.stringify(dc.colors));

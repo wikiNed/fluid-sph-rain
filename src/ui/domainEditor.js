@@ -257,7 +257,7 @@ export class DomainEditor {
           hierarchy: new Cesium.PolygonHierarchy(
             cartos.map((c) => Cesium.Cartesian3.fromRadians(c.longitude, c.latitude)),
           ),
-          material: color.withAlpha(0.08),
+          material: color.withAlpha(0.0),
         },
       }),
       this._viewer.entities.add({
