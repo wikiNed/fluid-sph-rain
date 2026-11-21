@@ -1,8 +1,8 @@
-const Cesium = globalThis.Cesium;
+﻿const Cesium = globalThis.Cesium;
 
 // 当前代码来自[少年啦1997]的开源代码，如果你是购买源码，请联系商家进行退款
-// 相机在体积盒「外面」时：只画朝向相机的面（BACK 剔除 = 保留正面），
-// 并用深度测试让地形正确遮挡水体——这是原版行为。
+// 相机在体积盒「外面」时：只画朝向相机的面（BACK 剔除 = 保留正面）。
+// 水体在片元着色器里按「地形交点」绘制湿膜；深度测试关闭（体积盒内的平滑地形与真实地形有米级差异，开启会整片判掉水体）。
 const volumeRenderState = {
   cull: {
     enabled: true,
@@ -18,15 +18,14 @@ const volumeRenderState = {
     functionDestinationAlpha: Cesium.BlendFunction.ONE_MINUS_SOURCE_ALPHA,
   },
   depthTest: {
-    enabled: true,
+    enabled: false,
   },
+    depthMask: false,
 };
 
 // 相机在体积盒「里面」时（缩放到地面附近、机位落在盒子内部）：
 // 盒子的所有面都背对相机，BACK 剔除会把整个盒子剔光 → 水体彻底消失。
-// 因此改成：不剔除、关闭深度测试，由片元着色器自己用「水面 < 地形」判断遮挡
-// （着色器里水面步进会被地形命中距离 tt 截断）。深度测试若保留，盒子远侧面的
-// 片元深度必然大于地形，会把「其实在水面之后、地形之前」的水体判掉。
+// 因此不剔除，并且同样关闭深度测试。
 const volumeInsideRenderState = {
   cull: {
     enabled: false,
@@ -151,6 +150,10 @@ export class FluidVolumeStage {
       modelMatrix: this._modelMatrix,
       shaderProgram,
       renderState: this._outsideRenderState,
+      // 仍然放在不透明 pass：Cesium 的 GLOBE pass 在其之前，地形深度已经写好，
+      // 片元着色器写入 gl_FragDepth 后深度测试就能用真实地形遮挡水体。
+      // （放到 TRANSLUCENT pass 会走 OIT 合成，颜色会被二次 gamma/透明混合压暗，
+      // 水体变成黑灰色斑块——这是本轮踩过的坑。）
       pass: Cesium.Pass.OPAQUE,
     });
   }
@@ -190,3 +193,5 @@ export class FluidVolumeStage {
     return Cesium.destroyObject(this);
   }
 }
+
+

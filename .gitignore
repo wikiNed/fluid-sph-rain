@@ -51,3 +51,7 @@ test/alpha_case_*.png
 
 test/film_*.png
 test/smsm_s*film*.png
+
+test/look_*.png
+test/fixture_water_probe.png
+test/_*_check.mjs

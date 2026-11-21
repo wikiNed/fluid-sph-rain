@@ -15,6 +15,7 @@ import { sampleTerrainDem } from "./src/io/terrainSampler.js";
 import { RainRegionEditor } from "./src/ui/rainRegionEditor.js";
 import { DomainEditor } from "./src/ui/domainEditor.js";
 import { createRainEffect } from "./src/render/rainEffect.js";
+import { createWaterSurface } from "./src/render/waterSurface.js";
 import { CASES, getCase } from "./src/data/cases.js";
 import { rasterizeRainMask } from "./src/sim/rainMask.js";
 import { rasterizeDomainMask } from "./src/sim/domainMask.js";
@@ -139,6 +140,7 @@ function syncDepthColorUniforms() {
   depthColorUniforms.c2 = cssColorToUniform(depthColorOptions.c2);
   depthColorUniforms.c3 = cssColorToUniform(depthColorOptions.c3);
   depthColorUniforms.c4 = cssColorToUniform(depthColorOptions.c4);
+  syncWaterSurface();
 }
 
 const options = {
@@ -197,6 +199,8 @@ const options = {
 let viewer;
 /** @type {TerrainFluidSimulation|null} */
 let fluid = null;
+/** @type {ReturnType<typeof createWaterSurface>|null} 贴地水体叠加层（地形遮挡天然正确） */
+let waterSurface = null;
 /** @type {RainRegionEditor} */
 let regionEditor = null;
 /** @type {DomainEditor} */
@@ -832,6 +836,10 @@ async function loadSample() {
 /* ==================================================================== */
 
 function teardownSimulation(alsoClearEntities) {
+  if (waterSurface) {
+    waterSurface.destroy();
+    waterSurface = null;
+  }
   if (fluid) {
     fluid.destroy();
     fluid = null;
@@ -859,6 +867,43 @@ function teardownSimulation(alsoClearEntities) {
   refreshButtons();
 }
 
+/**
+ * 创建/重建「贴地水体叠加层」。
+ *
+ * 水体不再由体积盒光线步进绘制：盒内是 1024² 平滑高度场，和真实地形差米级，
+ * 而真实雨量下水深只有厘米级 —— 水面要么悬空（游动的贴花），要么被地形判掉。
+ * 改用 Cesium 贴地多边形（GroundPrimitive）绘制，遮挡与起伏交给引擎，
+ * 材质只按水面纹理取水深着色。
+ */
+function mountWaterSurface() {
+  // 贴地多边形叠加层的方案已经验证不可行：GroundPrimitive / 贴地实体不提供
+  // 可用的 materialInput.st（实测恒为常量），无法按水深取色；因此水体仍由
+  // 体积阶段的湿膜渲染绘制，这里只确保它处于显示状态。
+  if (waterSurface) {
+    waterSurface.destroy();
+    waterSurface = null;
+  }
+  const volumeStage = fluid?._stages?.[4];
+  if (volumeStage) volumeStage.show = true;
+}
+
+/** 把 GUI/参数的改动同步到水体叠加层（分档、颜色、透明度、盒跨度）。 */
+function syncWaterSurface() {
+  if (!waterSurface) return;
+  waterSurface.update({
+    thicknessM: currentBoxThicknessM(),
+    bands: currentDepthBands(),
+    colors: [
+      depthColorOptions.c0,
+      depthColorOptions.c1,
+      depthColorOptions.c2,
+      depthColorOptions.c3,
+      depthColorOptions.c4,
+    ],
+    waterAlpha: options.waterAlpha,
+  });
+}
+
 async function finishStart(dem, domainMaskCanvas) {
   if (!extentIsValid(dem.extent)) {
     setStatus("❌ 覆盖范围无效，无法开始模拟");
@@ -874,6 +919,7 @@ async function finishStart(dem, domainMaskCanvas) {
 
   fluid = new TerrainFluidSimulation(viewer, dem, options);
   fluid.setDomainMask(domainMaskCanvas, !!state.domain);
+  mountWaterSurface(); // 水体改为贴地多边形绘制（遮挡由地形决定）
   updateDepthLegend(); // 体积盒跨度建立后才能把 5 档分界换算成正确米数
 
   rebuildRegionGui();
@@ -921,12 +967,17 @@ function restartSimulation() {
   }
   fluid.destroy();
   fluid = null;
+  if (waterSurface) {
+    waterSurface.destroy();
+    waterSurface = null;
+  }
   rainProgress.injected = "0.000";
   rainProgress.total = "0.0";
   rainProgress.mm = "0.0";
 
   fluid = new TerrainFluidSimulation(viewer, dem, options);
   fluid.setDomainMask(state.domainMaskCanvas, !!state.domain);
+  mountWaterSurface();
   updateDepthLegend();
   applyRainRegions(); // 雨区与降雨开关保持不变，重新开始累计
   refreshButtons();
@@ -1498,7 +1549,8 @@ function buildGui() {
   fSim.add(options, "depth", 50, 500).name("渲染质量");
   const cWaterAlpha = fSim
     .add(options, "waterAlpha", 0, 1.0)
-    .name("水透明度(0=不透明 1=最透)");
+    .name("水透明度(0=不透明 1=最透)")
+    .onChange(() => syncWaterSurface());
   cWaterAlpha.domElement.parentElement.title = "0：完全不透明（alpha 1.0）；1：最透明（alpha 0.2）";
 
   /* ---- 5 档水深配色 ---- */
@@ -1701,6 +1753,7 @@ function updateDepthLegend() {
       );
     })
     .join("");
+  syncWaterSurface(); // 分档米数/颜色随体积盒跨度与 GUI 变化
 }
 
 function refreshRainSummary() {
@@ -2518,6 +2571,21 @@ window.__app = {
   /** 体积盒竖直跨度（米）：shader 里 waterDepth(0~1) × 该值 = 真实水深 */
   volumeThickness() {
     return fluid?._volumeThickness ?? 0;
+  },
+  /** 贴地水体叠加层的状态（测试用） */
+  waterSurfaceInfo() {
+    const u = waterSurface?.material?.uniforms ?? {};
+    return {
+      exists: !!waterSurface,
+      visible: !!waterSurface?.entity?.show,
+      hasTexture: !!u.waterTexture,
+      thicknessM: u.thicknessM ?? 0,
+      bands: [u.band0 ?? 0, u.band1 ?? 0, u.band2 ?? 0, u.band3 ?? 0],
+      hazeAlpha: u.hazeAlpha ?? 0,
+      enabled: u.enabled ?? 0,
+      /** 体积渲染阶段是否已被隐藏（水体改由贴地多边形绘制） */
+      volumeStageVisible: !!fluid?._stages?.[4]?.show,
+    };
   },
   hasDomain() {
     return !!state.domain && state.domain.simPoly.length >= 3;

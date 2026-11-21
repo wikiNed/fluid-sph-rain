@@ -457,7 +457,11 @@ vec4 Render(in vec3 ro, in vec3 rd) {
           if (h < 0.0002 || tt > ret.y)
           break;
           tPrev = tt;
-          tt += h * 0.4;
+          // 步长上限 0.02 个体积盒高度（1000 m 的盒约 20 m 一步）：纯 h*0.4
+          // 的自适应步长在离地很高时会一次跨过山脊，于是「山脊背后的水」
+          // 被画到山脊前面，屏幕上就成了随视角漂移的贴花。封顶后与
+          // heightMap 自身的遮挡判定保持一致。
+          tt += min(h * 0.4, 0.02);
         }
 
        // 二分细化：h*0.4 是粗迭代，交点误差会让贴地的水膜抖动、
@@ -472,6 +476,8 @@ vec4 Render(in vec3 ro, in vec3 rd) {
 
     vec3 tc = vec3(0.0);
     float alpha = 0.0;
+    // 水深（米）必须在外层声明：下面计算片元深度时还要用到它。
+    float filmMeters = 0.0;
 
     // 水体渲染策略：只在「地形命中点」绘制湿膜，不再沿射线找水面。
     //
@@ -483,7 +489,7 @@ vec4 Render(in vec3 ro, in vec3 rd) {
     // 位移，不会再产生悬空面；水体颜色/透明度仍按真实水深（米）取值。
     if (tt < ret.y && ret.x <= tt) {
         vec3 groundPos = ro + rd * tt;
-        float filmMeters = getWaterDepth(groundPos) * max(1.0, depthRangeM);
+        filmMeters = getWaterDepth(groundPos) * max(1.0, depthRangeM);
         if (filmMeters > 0.0002) {
             float waterOpacity = mix(1.0, 0.2, clamp(waterAlpha, 0.0, 1.0));
 
@@ -498,10 +504,11 @@ vec4 Render(in vec3 ro, in vec3 rd) {
             float flatness = smoothstep(0.55, 0.90, nrm.y);
 
             tc = depthRamp(filmMeters);
-            // 透明度用平滑曲线（不要再用 5 档分界做跃变），否则水面会出现
-            // 一圈圈等高线似的“阶梯”，看着像贴图画坏了。
-            float vis = smoothstep(0.0, max(0.001, depthBand1), filmMeters);
-            alpha = waterOpacity * mix(0.30, 0.95, vis) * mix(0.10, 1.0, flatness);
+            // 透明度：极浅水（毫米级）只给很淡的湿痕，否则整片山坡会被
+            // 一层淡蓝雾气糊住（比"贴花"更难看）；到第一档才明显、到第二档接近不透明。
+            float w0 = smoothstep(0.004, max(0.02, depthBand0), filmMeters);
+            float vis = smoothstep(depthBand0, max(depthBand1, depthBand0 + 0.05), filmMeters);
+            alpha = waterOpacity * w0 * mix(0.18, 0.95, vis) * mix(0.12, 1.0, flatness);
         }
     }
 
@@ -519,3 +526,5 @@ void main() {
    out_FragColor = col;
 }
 `;
+
+

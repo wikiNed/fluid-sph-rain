@@ -1,4 +1,4 @@
-/**
+﻿/**
  * verify_fixes4.mjs —— 四项用户体验修复的回归断言（真 GPU CDP :9223）
  *
  * 覆盖：
@@ -197,10 +197,10 @@ async function main() {
       const spanLon = ext[2] - ext[0];
       const thick = Math.max(100, window.__app.depthConfig().boxThicknessM);
       const candidates = [
-        { lon, lat: lat - spanLat * 0.25, h: thick * 1.2, pitch: -40, heading: 0 },
-        { lon, lat: lat - spanLat * 0.6, h: thick * 1.6, pitch: -45, heading: 0 },
-        { lon: lon - spanLon * 0.6, lat, h: thick * 1.4, pitch: -45, heading: 90 },
-        { lon: lon + spanLon * 0.6, lat, h: thick * 1.4, pitch: -45, heading: 270 },
+        { lon, lat: lat - spanLat * 0.25, h: thick * 2.2 + 50, pitch: -40, heading: 0 },
+        { lon, lat: lat - spanLat * 0.6, h: thick * 3.0 + 50, pitch: -50, heading: 0 },
+        { lon: lon - spanLon * 0.6, lat, h: thick * 2.6 + 50, pitch: -45, heading: 90 },
+        { lon: lon + spanLon * 0.6, lat, h: thick * 2.6 + 50, pitch: -45, heading: 270 },
       ];
       const stage = window.__app.fluid._stages[4];
       let best = null;
