@@ -42,7 +42,7 @@
 | 5 | **模拟域与每个雨区都标注面积；支持清空模拟状态从 0 重新模拟** | 球面多边形面积公式 → 重心贴地标签显示 `xx.xx km²`（状态栏/GUI 同步汇总）；「🧹 重置模拟」保留域与雨区、只重建流体管线，水量与累计注入归零 | `src/sim/geoUtils.js`（`polygonAreaKm2`/`areaLabel`）+ `index.js`（`restartSimulation`） |
 | 6 | **公共资源标注（路名/地名）+ 降雨时的雨滴下落效果 + 5 档水深配色** | 底图之上叠加 ArcGIS `Reference/World_Transportation`（道路网/路名/公路编号）与 `Reference/World_Boundaries_and_Places`（地名/边界）两层透明瓦片；屏幕空间后处理雨丝（密度随雨强）；水色按体积盒跨度自动分 5 档着色（0.2%/0.5%/1%/2%）+ 左下角图例实时同步 | `index.js`（`addReferenceLayers` / `currentDepthBands`）+ `src/render/rainEffect.js` + `src/sim/shaders.js`（`depthRamp`） |
 | 7 | **中文路网/地名标注 + 相机贴近地面（进入体积盒）时水体仍可见** | 新增高德「透明路网+中文注记」叠加层（免 tk，中国境内）与天地图注记层（需自备 tk，无偏移）；体积阶段改为**相机在盒内时关闭背面剔除与深度测试**，由片元着色器自行做地形遮挡判断 | `index.js`（`syncZhLayers` / `ensureAmapZhLayer`）+ `src/render/FluidPipelineStages.js`（`_isCameraInsideBox` + `volumeInsideRenderState`）+ `src/sim/shaders.js`（`wt < min(tt, ret.y)`） |
-| 8 | **按实际降雨量模拟（1mm~1000mm，一场雨下完自动停）** | 雨量模式：给定累计雨量(mm)+降雨历时(s)，按体积守恒换算每格质量（`massPerMm = 1/(250×depthFullM)`，1000mm ⇒ 图例水深 1m），按「剩余量/剩余历时 × 真实 dt」逐帧分摊注入，达到设定雨量自动停止；预设 1/10/25/50/100/250/500/1000mm | `index.js`（`rainMode` / `_updateRainInjection` / `rainMassPerMm` + GUI「降雨控制」） |
+| 8 | **按实际降雨量模拟（1mm~1000mm，一场雨下完自动停）** | 雨量模式：给定累计雨量(mm)+降雨历时(s)，按体积守恒换算每格质量（`massPerMm = 1/(250×体积盒跨度)`，50mm ⇒ 5cm 水深），按「剩余量/剩余历时 × 真实 dt」逐帧分摊注入，达到设定雨量自动停止；预设 1/10/25/50/100/250/500/1000mm | `index.js`（`rainMode` / `_updateRainInjection` / `rainMassPerMm` + GUI「降雨控制」） |
 | 9 | **山洪案例库：点击案例 → 一键复演历史事件** | 工具栏「📚 案例库」面板列出 4 个山洪案例（地点/日期/伤亡/雨量情景 + 概况/机理/来源）；「▶ 一键复演」自动清空当前模拟 → 按案例取景范围建域 → 圈雨区 → 设雨量模式与累计雨量 → 移到案例机位 → 开始降雨 | `src/data/cases.js` + `index.js`（`buildCasePanel` / `runCase` / `setCaseCamera`） |
 
 顺带完成的基础增强：
@@ -399,11 +399,12 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 
 - **分档必须与水体几何高度用同一把尺子**：着色器里 `waterDepth` 是「占体积盒高度的归一化比例」，水面几何高度就是 `waterDepth × 体积盒高程跨度`。早期版本用固定米数 2/5/10/20 m 着色、却按 `depthFullM=40` 换算，山区 1000 m 级体积盒里水明明堆了几十米高、图例却只显示一两米——用户一眼就看出"水很深、颜色很浅"。现在 `DEPTH_BAND_FRACS = [0.002, 0.005, 0.01, 0.02]` 乘以**当前体积盒真实跨度**得到分界（`currentDepthBands()` / `currentBoxThicknessM()`），`depthRangeM` uniform 同样等于盒跨度，于是颜色、图例、几何高度三者完全一致。
 - 选 0.2%/0.5%/1%/2% 的原因：在常见的 1000 m 级山区体积盒上正好落回 2/5/10/20 m 这套直观米制刻度；换成起伏 235 m 的夹具流域则自动缩到 0.5/1.2/2.4/4.7 m，不会因为盒子矮就全部变红。
-- 因而**不再提供可拖动的分界滑块**（曾经能拖出 23.5–23.5 这类退化档位）与 `depthFullM` 配色滑块；`depthFullM` 只保留为雨量换算标定（§5.13），放在「降雨控制」里。
+- 因而**不再提供可拖动的分界滑块**（曾经能拖出 23.5–23.5 这类退化档位）。原先用于配色的 `depthFullM` 常量已彻底删除（§5.13 说明为什么它必然错），配色不再有任何"人为标定"入口。
 - 颜色 uniform 传 sRGB 原值，着色器内 `czm_gammaCorrect()` 转线性后再混合；`depthColorEnabled` 为 0/1 uniform（默认 1），关闭则回退原渐变。
 - 左下角 `#depthLegend` 图例由 `updateDepthLegend()` 依据 `currentDepthBands()` 实时重建；流体建立后（`finishStart()`/`restartSimulation()`）与打开分档着色时都会刷新，所以图例米数会随盒跨度变化。
 - 透明度语义（GUI「水透明度」）：滑块 **0 = 完全不透明（alpha = 1.0）**、**1 = 最透明（alpha = 0.2）**，中间线性插值：`float waterOpacity = mix(1.0, 0.2, clamp(waterAlpha, 0.0, 1.0));`。水体 alpha 的深度权重**跟着 5 档第一档走**：`float depthWeight = smoothstep(0.0, max(0.05, depthBand0), waterDepth * depthRangeM); alpha = waterOpacity * mix(0.55, 1.0, depthWeight);`——浅浅一层就有 0.55 可见度、达到第一档水深即完全不透明。之前用固定的 5% 盒高（≈ 50 m 水深才不透明）导致几十毫米降雨的水体几乎画不出来，看起来"水是空的"。Fresnel/高光也乘同一个 `waterOpacity`，避免"最透明档还留一层亮膜"。默认 0.2 对应 alpha≈0.84。
 - 降雨区填充 alpha 从 0.10 降到 **0.045**：之前那层淡蓝覆盖太像"一层透明的水"，用户会把填充误认成水体；现在它只作极轻的指示。
+- **薄层水湿膜回退**：真实雨量落地后水深常只有几厘米，而体积光线步进的步长是米级（盒高上千米、`depth` 180 步），射线根本打不到水面 → 明明有积水却看不见。`Render()` 末尾加了"地形命中点按真实水深叠色"的回退：`if (alpha < 0.01 && tt < ret.y && ret.x <= tt)` 时取 `filmMeters = getWaterDepth(地面命中点) × depthRangeM`，用 `depthRamp(filmMeters)` 给地面叠一层不透明度随水深从 0.25 升到 0.85 的湿膜（同样乘 `waterOpacity`）。立体水面（深水）路径不变；这样"5cm 的面雨"也能看出积水范围与相对深浅，且数值仍是真实水深。
 
 验证：`test/verify_features2.mjs`（29 项）覆盖参考图层、图例 5 行动态文案与色块、`depthColorEnabled` → uniform 与图例联动、`depthRangeM = 盒跨度`、雨滴渲染证据；`test/verify_fixes4.mjs`（21 项）覆盖分档随盒跨度缩放、累计降雨量跨场累加、水透明度=0 时水体像素差分 0.58%（≈完全不可见）。截图 `docs/images/12_rain_effect.png`、`docs/images/13_depth_colors.png`。
 
@@ -425,15 +426,16 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 除了原来的「雨强模式」（按连续雨强注水，雨不停水不停），新增**雨量模式**：给定「本场累计降雨量(mm) + 降雨历时(秒)」，按体积守恒把这场雨均匀注入雨区，下完自动停止。
 
 - **GUI**：「降雨控制」→「降雨模式」在强度/雨量之间切换；雨量模式显示「累计雨量(mm)」「降雨历时(秒)」「雨量预设」，隐藏雨强；右侧读数变为「已降雨量(mm)」与「等效雨强(mm/h)」。预设档位 1 / 10 / 25 / 50 / 100 / 250 / 500 / 1000 mm（参考 GB/T 28592 的 24h 降水量等级），等效雨强 = `mm / 历时 × 3600`，雨丝密度按其对数映射到 0.35~1.25。
-- **米制换算（体积守恒，核心）**：着色器里水量是"占体积盒高度的归一化比例"，图例米数 = `data.x × 0.25 × depthFullM`。要让「图例水深 × 面积 = 真实降雨体积」，每格目标质量必须是
+- **米制换算（体积守恒，核心）**：着色器里水量是"占体积盒高度的归一化比例"，图例米数 = `data.x × 0.25 × 体积盒高程跨度 T`。要让「图例水深 × 面积 = 真实降雨体积」，每格目标质量必须是
 
-  `data.x = P米 / (0.25 × depthFullM) = P毫米 / (250 × depthFullM)`
+  `data.x = P米 / (0.25 × T) = P毫米 / (250 × T)`
 
-  即 `massPerMm = 1 / (250 × depthFullM)`（默认 `depthFullM=40` → `1e-4`）。于是 **1000mm 降雨 = 图例水深 1m**，与真实降雨深度一致；500mm = 0.5m。代码 `rainMassPerMm()`，注释里保留了这段推导。
+  即 **`massPerMm = 1 / (250 × T)`**，**T 必须取当前体积盒的真实跨度**（`fluid._volumeThickness`，双石门案例 1072.6 m → `3.729e-6`）。于是雨区内均匀降雨 P 毫米就得到 P/1000 米水深：50 mm ⇒ 5 cm、1000 mm ⇒ 1 m。代码 `rainMassPerMm(thicknessM)`，注释里保留了推导。
+- **曾经的 27 倍放大错误（务必记住）**：早期把 T 写死成 `depthFullM=40`，山区 1000 m 盒里同样的雨量算出来的质量是正确值的 27 倍——1.46 km² × 50 mm 本该平均 5 cm，模型却堆出十几米、大片 5 m 深的水。**凡是"归一化深度 ↔ 米"的换算，只能乘体积盒真实跨度，不能乘任何人为标定常量**。现在 `depthFullM` 已从 options / GUI / `depthConfig()` / `rainfallConfig()` / `getRainfallStats()` 中全部删除。
 - **注入节流**：`TerrainFluidSimulation._updateRainInjection()` 每帧用「剩余质量 / 剩余历时 × 真实 dt」分摊到两个 Simulation pass（各一半），`dt` 夹 0.25s 上限；达到设定雨量后 `_rainPassInjection = 0` 自动停止。因为按真实时间而不是帧数积分，**掉帧时总注入量依然守恒**。实测：100mm/10s 一场雨在 10.02s 时已注入 100.000mm、passInjection=0。
-- **几何放大说明**：着色器里水柱的几何高度按体积盒高程跨度放大（倍数 ≈ 盒高跨度 / `depthFullM` ≈ 50×），保证在上千米高差的地形上米级积水肉眼可见；**5 档配色与图例现在跟随几何高度（§5.11），所以颜色与画面里看到的水深一致**；「已降雨量(mm) / 累计降雨量(mm)」才是真实雨量口径，两套口径不要混用。
-- **状态与重置**：`rainProgress = { injected, total, mm, rate }`。`injected` 是内部质量统计；GUI「累计降雨量(mm)」读 `total`（`_rainTotalMm`），**跨多场降雨累加**——比如先下一场 100mm、再下一场 200mm，读数就是 300mm，只有「🧹 重置模拟」才归零；「已降雨量(mm)」读 `mm`，是**本场**进度，切换模式/雨量/历时、重开降雨、改动雨区或全域降雨时由 `resetRainfallEvent()` 归零（已注入的水量不撤销，仍会继续流动汇聚）。测试钩子：`__app.setRainfall(mm, durationSec, mode)`、`__app.rainfallConfig()`（`stats.totalMm`）。
-- **实测（真 GPU :9223，夹具 DEM 盒厚 235m）**：100mm/10s 下完回读 `surfaceTexture`（雨量口径换算 `data.x×0.25×depthFullM`），湿格 63.8%、最大等效水深 0.57m；1000mm/10s 最大 1.95m；**两者水体总质量比 10.36 ≈ 10**，证明"设定雨量 → 注入量 → 落地水量"三者一致。真地形两雨区 500mm/60s 演示（显示口径，盒跨度 ~1949 m）：湿格 15%、平均 9.0 m、最大 85.3 m，5 档占比 50/26/10/8/5%，深水区出现黄/红档——"看起来深就显示深色"。
+- **画面上怎么看见薄水**：真实雨量落地后水深常只有几厘米，而体积光线步进步长是米级，射线打不到水面 → 水体“消失”。因此 `Render()` 末尾有湿膜回退：在地形命中点按 `getWaterDepth × depthRangeM` 的真实水深叠一层 `depthRamp()` 颜色（不透明度 0.25→0.85 随第一档水深增强）。立体水面（深水）路径不变；颜色、图例、几何高度三者完全一致（§5.11）。
+- **状态与重置**：`rainProgress = { injected, total, mm, rate }`。`injected` 是内部质量统计；GUI「累计降雨量(mm)」读 `total`（`_rainTotalMm`），**跨多场降雨累加**——比如先下一场 100mm、再下一场 200mm，读数就是 300mm，只有「🧹 重置模拟」才归零；「已降雨量(mm)」读 `mm`，是**本场**进度，切换模式/雨量/历时、重开降雨、改动雨区或全域降雨时由 `resetRainfallEvent()` 归零（已注入的水量不撤销，仍会继续流动汇聚）。测试钩子：`__app.setRainfall(mm, durationSec, mode)`、`__app.rainfallConfig()`（`stats.totalMm` / `stats.boxThicknessM`）。
+- **实测（真 GPU :9223，夹具 DEM 盒厚 235m）**：100mm/10s 下完全部注入，回读 `surfaceTexture` 换真实水深（`data.x × 0.25 × boxThicknessM`），湿格 63.8%、最大 1.73 m（沟道汇聚，均匀面雨只有 10 cm）；1000mm/10s 最大 ~4.6 m；**两者水体总质量比 ≈ 10.4**，说明"设定雨量 → 注入量 → 落地水量"一致。双石门 50mm/60s：`massPerMm=3.729e-6`、目标质量 1.865e-4、T68 注入 50.000mm 后自动停，湿区均值 0.67 m、最大 0.85 m（旧 27× 标定下同场景均值 3.1 m / 最大 17.0 m）；150mm/60s：均值 1.26 m、最大 3.65 m、87.9% 落在 0–2.1 m 档，已出现深蓝档，无黄/红档。
 - **限制**：雨区内为**均匀面雨**，没有空间梯度；不含蒸发/下渗/出流边界；GUI 历时范围 10~600s，所以 1mm 这种小雨在一场雨里几乎不可见（真实亦如此，想看明显积水请用 100~1000mm 或切回强度模式长跑）。
 - **GUI 按模式显隐的坑（dat.GUI）**：`controller.domElement` 是控件容器 `div.c`（滑块/下拉本体），不是占一行的 `li.cr`。只把 `domElement.style.display` 设为 none 会**留下空行**（标签还在、行高不变），必须 `domElement.closest("li.cr")` 整行隐藏；验证时也不能只看 `domElement`，要用整行的 `getComputedStyle` 或「面板高度变化」（实测强度模式 222px / 雨量模式 361px）。
 - 验证：`test/verify_rainfall.mjs`（35 项）覆盖配置换算、注入推进与自动停止、回读水量量级、100mm vs 1000mm 质量比 ≈10、重置归零、切回强度模式、GUI 整行显隐与面板高度变化、5 档图例与无致命错误，ALL PASS。演示图 `docs/images/15_rain_amount.png`（出图脚本 `test/demo_rain_amount.mjs`）。
@@ -444,14 +446,14 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 
 - **灾点定位**：会川镇（104.01279°E, 35.03096°N）以南 10 km；实机探针在 `103.995°E, 34.945°N` 一带看到「黄香沟」注记 + G212 + 白色辫状河床 + V 型谷，确认可复演沟段，地面高程 2986~3279 m。
 - **模型设置**：`test/demo_shuangshimen.mjs`，`EXTENT=[103.978,34.923,104.016,34.963]`（3.5×4.4 km，10.52 km²，高程 2629~3701 m），域多边形 6 顶点（`commitGlobeDomain(extent, vertices)`，v=0 为北），上游雨区 1.46 km²（域内约 14%），雨量模式 50 mm / 60 s 与 150 mm / 60 s（时间压缩后的等效雨强 3000 / 9000 mm/h）。
-- **结果对比**（回读 `surfaceTexture`，显示水深 = 几何高度口径，盒跨度 1073 m）：
+- **结果对比**（回读 `surfaceTexture`，水深 = `data.x × 0.25 × 盒跨度`，盒跨度 1073 m）：
 
-  | 情景 | 湿面占比 | 平均显示水深 | 最大显示水深 | 形态 |
+  | 情景 | 湿面占比 | 平均水深 | 最大水深 | 形态 |
   | --- | --- | --- | --- | --- |
-  | 50 mm | 4.8% | 3.1 m | 17.0 m | 仅树枝状沟道内汇流，未漫滩（5 档以浅蓝/深蓝为主） |
-  | 150 mm | 9.0% | 5.5 m | 31.3 m | 沟道漫溢 + 坡脚片流 + 沟口淹没扇（出现 5.4% 红色深水格） |
+  | 50 mm | ~5% | 0.67 m | 0.85 m | 仅树枝状沟道内汇流，未漫滩（全部落 0–2.1 m 浅蓝档） |
+  | 150 mm | ~9% | 1.26 m | 3.65 m | 沟道漫溢 + 坡脚片流 + 沟口淹没扇（12% 进入深蓝档） |
 
-  雨量增至约 3 倍时湿面 1.9×、最大显示水深 1.8×，且**形态发生质变**（线状沟道 → 面状淹没），正对应露营地所在的河漫滩被整体淹没。
+  雨量增至约 3 倍时最大水深 4.3×，且**形态发生质变**（线状沟道 → 面状淹没），正对应露营地所在的河漫滩被整体淹没。数值与「1.46 km² × 50 mm 均匀面雨只有 5 cm」的守恒预期一致；早期版本因 `depthFullM=40` 把雨量放大 27 倍（均值 3.1 m / 最大 17 m），已修正。
 - **脚本要点**：①雨区顶点必须严格在模拟域内，否则 `RainRegionEditor` 整块拒绝、`_rainMaskLive` 为 null，雨量模式判定无雨区而不注水（首跑即踩此坑，雨区内缩后才通）；②出图前遍历 `viewer.entities` 把 `e.polygon.show`/`e.label.show` 置 false，去掉半透明填充蒙版与标签，只留描边与图例；③页面被遮挡时 rAF 暂停导致仿真时间落后于墙钟，**必须轮询 `rainfallConfig().stats` 直到 `passInjection===0`** 再截图，不能用固定 `sleep`。
 - 图：`docs/images/16_shuangshimen_50mm.png`、`docs/images/17_shuangshimen_150mm.png`。
 
@@ -606,10 +608,10 @@ A = R² / 2 · | Σ (λ₂ − λ₁)(sin φ₁ + sin φ₂) |      R = 6371008.
 | `probe_area_math.mjs` | 面积公式纯 Node 单测：0.01°×0.01° @34.5°N = 1.0189 km²（理论 1.019）、顶点反序一致、退化输入（§5.8） |
 | `verify_area_reset.mjs` | **面积标注 + 重置模拟**回归（17 项）：面积数值合理（多边形 < bbox 且同量级）、三个贴地标签文本、`btnReset` 可用、重置后注入量归零且可重新累计、域与雨区保留、无致命错误（§5.8） |
 | `demo_area_labels.mjs` | 生成面积标注演示截图 `shot_area_labels.png`（注意须等 `flyTo` 1.5s 结束后再 `setView`） |
-| `verify_features2.mjs` | **参考图层 + 雨滴效果 + 5 档水深配色**回归（29 项）：影像层数=3、道路网/地名标注加载与开关同步、图例 5 行文案与色块、`depthColorEnabled` → uniform 与图例联动、`depthRangeM=depthFullM`、雨滴 stage 开关与像素差 42% 渲染证据、无致命错误（§5.9~§5.11） |
+| `verify_features2.mjs` | **参考图层 + 雨滴效果 + 5 档水深配色**回归（29 项）：影像层数=3、道路网/地名标注加载与开关同步、图例 5 行文案与色块、`depthColorEnabled` → uniform 与图例联动、`depthRangeM=`体积盒跨度、`depthFullM` 已移除、雨滴 stage 开关与像素差 42% 渲染证据、无致命错误（§5.9~§5.11） |
 | `probe_ref_speed.mjs` | 页面内测 `ArcGisMapServerImageryProvider.fromUrl` 两层 Reference 的加载耗时与影像层数 |
 | `demo_rain_only.mjs` / `demo_showcase.mjs` | 生成文档截图：雨滴下落效果（`rain_fx_close.png`）/ 5 档配色全景（`showcase_wide.png`） |
-| `demo_pool.mjs` / `demo_rain_depth.mjs` | 长跑回读 `surfaceTexture` 统计五档直方图 + 多时刻截图（标定 `depthFullM` 用） |
+| `demo_pool.mjs` / `demo_rain_depth.mjs` | 长跑回读 `surfaceTexture` 统计五档直方图 + 多时刻截图（分档与米数取 `depthConfig().bands` / `boxThicknessM`） |
 | `verify_features3.mjs` | **中文标注 + 盒内可见性**回归（24 项）：高德层默认创建/显示、开/关像素差 13%、天地图无 tk 不建层/填 tk 建层/取消勾选隐藏、盒外 `_insideBox=false`、盒内（中部/近地面）`_insideBox=true` 且体积贡献像素 >1%（修复前 ≈0）、5 档图例、无致命错误（§5.9 / §5.12） |
 | `probe_water_inside2.mjs` | 夹具 DEM 盒内机位高度扫描（:9223）：逐高度打印 `_insideBox`/局部坐标/体积阶段开/关像素差 + 截图，是 §6.10 的定位与验证脚本 |
 | `probe_zh_inside.mjs` / `probe_zh_inside2.mjs` / `diag_zh_layer.mjs` | 中文叠加层 / 盒内水平视角出图探针（其中 `diag_zh_layer.mjs` 用来确认影像层顺序，避免后加的底图盖住中文叠加层） |
@@ -656,14 +658,14 @@ chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<dir> `
 | `depth` | GUI | 50~500 | 体积渲染光线步进次数（质量/性能权衡） |
 | `globeSampleGrid` | options / GUI「地形采样精度」 | 96（预设 96/192/256/384/512） | 全球模式采样网格边长（点数）。点距 = 跨度/(N−1)；越大地形越精细但采样越慢。DEM 与 SPH 网格固定 1024²（§5.16） |
 | `reliefMeters` | GUI | 50~3000（默认600） | 上传无参考图片时体积盒竖直厚度 |
-| `depthFullM` | GUI「降雨控制」→「雨量换算标定(米)」 | 5~200（默认40） | **雨量→质量换算标定**：`massPerMm = 1/(250×depthFullM)`，只影响雨量模式的注水量，不再参与 5 档配色（配色改按体积盒跨度自动分档，§5.11） |
+| ~~`depthFullM`~~ | — | — | **已删除**。它曾把体积盒跨度写死成 40 m，导致雨量换算放大 27 倍（§5.13）；现在所有"归一化深度 ↔ 米"换算一律用 `fluid._volumeThickness`（盒真实跨度） |
 | `depthColorEnabled` | GUI | 0/1（默认1） | 5 档水深配色开关；关闭回退原「浅水→深水」渐变并隐藏图例 |
 | `rainFx` | GUI「雨滴下落效果」 | 布尔（默认 true） | 屏幕空间雨丝后处理开关；仍需「开始降雨」且有启用雨区（§5.10） |
 | `refRoads` / `refPlaces` | GUI「标注图层」 | 布尔（默认 true） | ArcGIS Reference 道路网 / 地名标注透明叠加层（§5.9） |
 | `refZhAmap` | GUI「标注图层」 | 布尔（默认 true） | 高德中文路网/地名透明叠加层；中国境外无瓦片、GCJ-02 偏移，仅视觉参考（§5.9） |
 | `refTdtLabels` / `tdtToken` | GUI「标注图层」 | 布尔（默认 false）/ 字符串 | 天地图中文注记层；tk 需自备（免费申请），为空时勾选只会提示、不建层（§5.9） |
 | `rainMode` | GUI「降雨模式」 | `"intensity"` / `"amount"`（默认 intensity） | 强度模式=按雨强连续注水；雨量模式=按累计雨量(mm)+历时注水，下完自动停（§5.13） |
-| `rainAmountMm` | GUI「累计雨量(mm)」/「雨量预设」 | 1~1000（默认 50） | 雨量模式本场累计降雨量。按体积守恒换算：1000mm ⇒ 图例水深 1m（`massPerMm = 1/(250×depthFullM)`）（§5.13） |
+| `rainAmountMm` | GUI「累计雨量(mm)」/「雨量预设」 | 1~1000（默认 50） | 雨量模式本场累计降雨量。按体积守恒换算：均匀落地水深就是 `mm/1000` 米（50mm ⇒ 5cm），`massPerMm = 1/(250×体积盒跨度)`（§5.13） |
 | `rainDurationSec` | GUI「降雨历时(秒)」 | 10~600（默认 120） | 雨量模式本场降雨历时；等效雨强 = `mm/历时×3600`，只影响注入快慢与雨丝密度（§5.13） |
 
 ## 9. 已知限制与 TODO
@@ -682,7 +684,7 @@ chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<dir> `
 - **高德中文叠加层的两个限制**：①只覆盖中国境内，境外/远海请求会 404（图层透明，无视觉影响，仅控制台噪声）；②GCJ-02（火星坐标）与 WGS84 影像存在数百米偏移，路名/村庄名位置只能作视觉参考；需要无偏移中文注记时请用天地图 `cva_w`（需自备 tk）。
 - **天地图注记需要 tk**：未填 tk 时勾选「中文注记(天地图·需tk)」只会弹提示、不创建图层；填入后自动创建，`tk` 改了会自动重建图层（§5.9）。
 - **体积盒内渲染开销**：相机在盒内时体积阶段关闭剔除与深度测试，整屏都在光线步进，但仍是每像素固定步数（`depth` 参数），实测盒内 60fps；若在集显上明显掉帧，可把 GUI「渲染质量」调低（§5.12）。
-- **5 档配色的"米"在两套模式下含义不同**：雨量模式下 `massPerMm` 由 `depthFullM` 反推（1000mm ⇒ 1m），图例米数是**真实降雨深度**；强度模式下图例米数只是配色标定值（默认雨强下 `depthFullM=40` 让 1~2 分钟降雨铺满五档），两者不要混用比较（§5.11 / §5.13）。
+- **5 档配色的"米"是真实水深**：分档与图例米数 = `waterDepth × 体积盒跨度`，与水面几何高度同一把尺子；雨量模式下均匀落地水深就应约等于 `mm/1000`（沟道汇聚处更深）。强度模式的米数同样是真实深度，只是雨强给定、总雨量不预设（§5.11 / §5.13）。
 - **雨量模式为均匀面雨**：雨区内空间均匀、无空间梯度，也不含蒸发/下渗/出流边界；1mm 这类小雨在一场雨里几乎不可见（真实亦如此），要明显积水请用 100~1000mm 或切回强度模式长跑。雨量模式的"水文真实性"到此为止——它是把**总雨量按体积守恒落地**，不是完整水文模型（§5.13）。
 - **TODO 候选**：模拟域/雨区导入导出（GeoJSON）；按 DEM 坡向/汇流累积图预置"天然汇水区"；多文件时序降雨（雨强随时间曲线）；将 `_test` 中的交互式视觉脚本整合为 `npm run verify`；雨滴效果支持雨量粒子/落地涟漪。
 

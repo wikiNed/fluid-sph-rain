@@ -47,7 +47,11 @@ async function main() {
     const cfg0 = await page.evaluate(() => window.__app.rainfallConfig());
     check("默认降雨模式为强度模式", cfg0.mode === "intensity", cfg0.mode);
     check("默认雨量 50mm / 历时 120s", cfg0.amountMm === 50 && cfg0.durationSec === 120);
-    check("默认 massPerMm = 1e-4（depthFullM=40）", Math.abs(cfg0.massPerMm - 1e-4) < 1e-12, cfg0.massPerMm);
+    check(
+      "massPerMm 由体积盒跨度推出 = 1/(250·T)",
+      Math.abs(cfg0.massPerMm - 1 / (250 * cfg0.boxThicknessM)) < 1e-12,
+      `massPerMm=${cfg0.massPerMm} T=${cfg0.boxThicknessM}`,
+    );
     check("默认等效雨强 1500 mm/h", Math.abs(cfg0.rateMmH - 1500) < 1e-6, cfg0.rateMmH);
     const guiInit = await page.evaluate(() => window.__app.rainGuiState());
     check(
@@ -99,11 +103,12 @@ async function main() {
                   if (x > 0) { sum += x; wet++; if (x > max) max = x; }
                 }
               }
+              const thick = window.__app.depthConfig().boxThicknessM;
               resolve({
                 w, h, sum: +sum.toFixed(6), wet, wetPct: +((100 * wet) / (w * h)).toFixed(2), max,
-                // 图例水深(米) = data.x × heightScale(0.25) × depthFullM(40)
-                maxDepthM: +(max * 0.25 * 40).toFixed(3),
-                meanDepthM: wet > 0 ? +((sum * 0.25 * 40) / wet).toFixed(4) : 0,
+                // 真实水深(米) = data.x × heightScale(0.25) × 体积盒高程跨度
+                maxDepthM: +(max * 0.25 * thick).toFixed(3),
+                meanDepthM: wet > 0 ? +((sum * 0.25 * thick) / wet).toFixed(4) : 0,
               });
             });
           });
@@ -166,7 +171,11 @@ async function main() {
 
     const surf100 = await page.evaluate(() => window.__probe.readSurface());
     check("100mm 降雨后地形上出现水体（回读 data.x>0）", !!surf100 && surf100.wet > 0, JSON.stringify(surf100 && { wet: surf100.wet, wetPct: surf100.wetPct, maxDepthM: surf100.maxDepthM }));
-    check("100mm 水深量级合理（0.001~1m）", !!surf100 && surf100.maxDepthM > 0.001 && surf100.maxDepthM < 1, `maxDepthM=${surf100?.maxDepthM}`);
+    check(
+      "100mm 水深量级合理（均匀 0.1m，汇流后局部 < 3m）",
+      !!surf100 && surf100.maxDepthM > 0.02 && surf100.maxDepthM < 3,
+      `maxDepthM=${surf100?.maxDepthM} mean=${surf100?.meanDepthM}`,
+    );
     await page.screenshot({ path: OUT + "rainfall_100mm.png" });
 
     /* ---------- E1. 重置模拟 → 水量归零 ---------- */

@@ -539,6 +539,21 @@ vec4 Render(in vec3 ro, in vec3 rd) {
         }
     }
 
+    // 薄层水（厘米级）：体积盒高差上千米时，水面只比地形高几厘米，
+    // 光线步进的步长是米级，根本打不到水面 → 看起来“没有水”。
+    // 这类水不画立体水面，而是直接在地形命中点叠一层「按真实水深着色的湿膜」：
+    // 范围与深浅都是真实值（颜色来自 5 档配色），只是不再有几何厚度。
+    if (alpha < 0.01 && tt < ret.y && ret.x <= tt) {
+        vec3 groundPos = ro + rd * tt;
+        float filmMeters = getWaterDepth(groundPos) * max(1.0, depthRangeM);
+        if (filmMeters > 0.0002) {
+            float filmOpacity = mix(1.0, 0.2, clamp(waterAlpha, 0.0, 1.0));
+            float w = smoothstep(0.0, max(0.05, depthBand0), filmMeters);
+            tc = depthRamp(filmMeters);
+            alpha = filmOpacity * mix(0.25, 0.85, w);
+        }
+    }
+
     // 如果没有水但有地形
     if (alpha < 0.01 && tt < ret.y) {
         discard;

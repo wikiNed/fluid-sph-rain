@@ -48,3 +48,6 @@ test/_served_check.mjs
 test/rain_amount_*.png
 test/_*.log
 test/alpha_case_*.png
+
+test/film_*.png
+test/smsm_s*film*.png

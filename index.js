@@ -175,11 +175,8 @@ const options = {
 
   // —— 新增：5 档水深配色 ——
   depthColorEnabled: true, // 是否用 5 档水深配色替换默认浅水→深水渐变
-  // 满档水深（米）：着色器里的水深是“占体积盒高度的归一化比例”，
-  // 该比例 × depthFullM 才得到图例上的“米”。因为 SPH 的归一化质量单位
-  // 与真实降雨量并非 1:1（实际水深可达数百米），必须用一个可调标定值
-  // 把默认雨强下 1~2 分钟降雨过程的深度变化铺满 0~20m 五档。
-  depthFullM: 40,
+  // 分档米数由体积盒高程跨度 × DEPTH_BAND_FRACS 自动推导，没有可调标定值了：
+  // 真实水深与画面几何高度、配色米数是同一把尺子（见 §5.11）。
 
   // —— 新增：公共参考图层（叠加在卫星影像之上）——
   refRoads: true, // 道路网（含路名 / 公路编号）
@@ -369,20 +366,24 @@ function syncZhLayers() {
 /**
  * 雨量模式的核心换算：把「累计降雨量(mm)」换算成每个格子需要注入的 SPH 质量。
  *
- * 推导（体积守恒，以 5 档图例的「米」为准）：
+ * 推导（体积守恒，直接对真实水深，不再借助任何标定值）：
  *   - 着色器里 waterDepth（占体积盒高度的归一化比例）= data.x * heightScale(0.25)，
- *     图例米数 = waterDepth × depthFullM，即 1 个质量单位 ≈ 0.25×depthFullM 米。
- *   - 若想让图例米数等于真实的等效降雨深度（1mm → 0.001m），则每格目标质量
- *     data.x = P米 / (0.25 × depthFullM) = P毫米 / (250 × depthFullM)。
- *   - 于是「图例水深 × 面积」= 降雨量 × 雨区面积，即画面上的水量与真实降雨体积一致；
- *     而地形上水柱的几何高度仍是放大显示（放大倍数 = 体积盒高程跨度 / depthFullM，
- *     默认约 50×），这是为了让人眼在高差上千米的地形上看清米级积水（见 §5.13）。
+ *     地形上水柱的几何高度 = waterDepth × 体积盒高程跨度 T，即 1 个质量单位 = 0.25·T 米。
+ *   - 雨区内每格面积都相同，均匀降雨 P 毫米后均匀水深就是 P/1000 米（与雨区多大无关：
+ *     雨区面积按比例分到对应比例的格子数，两边约掉）。
+ *   - 因此每格目标质量 data.x = P米 / (0.25·T) = P毫米 / (250·T)。
+ *   - 于是「水深 × 面积」= 降雨量 × 雨区面积，画面水量与真实降雨体积一致；
+ *     5 档配色也按同一个 T 缩放，颜色与真实水深一一对应。
  *
+ * 旧实现把 T 写死成 depthFullM=40，导致真实水深被放大 27 倍（T≈1093 m 时），
+ * 1.46 km² 上 50 mm 降雨（7.3 万 m³）被画成大片 5 m 深的积水 —— 物理上不可能。
+ *
+ * @param {number} thicknessM 当前体积盒的高程跨度（米）
  * @returns {number} 每 1mm 累计降雨量对应的每格质量增量
  */
-function rainMassPerMm() {
-  const fullM = Math.max(1, Number(options.depthFullM) || 40);
-  return 1 / (250 * fullM);
+function rainMassPerMm(thicknessM) {
+  const t = Math.max(1, Number(thicknessM) || 0);
+  return 1 / (250 * t);
 }
 
 /** 雨量模式：累计雨量 / 降雨历时 → 等效雨强（mm/h），用于雨丝密度与读数 */
@@ -1536,12 +1537,8 @@ function buildGui() {
     .add(options, "rainIntensity", 0.0001, 0.003, 0.0001)
     .name("降雨强度(默认0.0004)")
     .onChange(refreshRainSummary);
-  // 雨量→质量的换算标定：决定“1 mm 雨量注入多少 SPH 质量”，
-  // 与水深配色无关（配色已改为按体积盒高度比例自动分档，见 DEPTH_BAND_FRACS）。
-  const cCalib = fRain
-    .add(options, "depthFullM", 5, 200, 1)
-    .name("雨量换算标定(米)")
-    .onChange(() => refreshRainSummary());
+  // 雨量→质量换算不需要标定值：每 mm 注入的质量由体积盒高程跨度直接推出
+  // （massPerMm = 1/(250·T)），保证 1.46 km² × 50 mm 就是 7.3 万 m³ 水。
   const cAmount = fRain
     .add(options, "rainAmountMm", 1, 1000, 1)
     .name("累计雨量(mm)")
@@ -1805,7 +1802,7 @@ class TerrainFluidSimulation {
       this._updateRainInjection();
       rainProgress.injected = this._injectedSum.toFixed(3);
       if (settings.rainMode === "amount") {
-        const massPerMm = rainMassPerMm();
+        const massPerMm = rainMassPerMm(this._volumeThickness);
         rainProgress.mm = (this._rainAmountInjected / massPerMm).toFixed(1);
         rainProgress.rate = rainAmountRateMmH().toFixed(0);
         rainProgress.total = this._rainTotalMm.toFixed(1);
@@ -1860,7 +1857,7 @@ class TerrainFluidSimulation {
       return;
     }
 
-    const massPerMm = rainMassPerMm();
+    const massPerMm = rainMassPerMm(this._volumeThickness);
     this._rainAmountTotal =
       Math.max(0, Number(settings.rainAmountMm) || 0) * massPerMm;
     const duration = Math.max(1, Number(settings.rainDurationSec) || 1);
@@ -1903,13 +1900,14 @@ class TerrainFluidSimulation {
   /** 雨量模式统计（测试/状态栏读数用） */
   getRainfallStats() {
     const settings = this._settings;
-    const massPerMm = rainMassPerMm();
+    const massPerMm = rainMassPerMm(this._volumeThickness);
     return {
       mode: settings.rainMode,
       targetMm: Math.max(0, Number(settings.rainAmountMm) || 0),
       durationSec: Math.max(1, Number(settings.rainDurationSec) || 1),
       rateMmH: rainAmountRateMmH(),
       massPerMm,
+      boxThicknessM: this._volumeThickness,
       targetMass: this._rainAmountTotal,
       injectedMass: this._rainAmountInjected,
       injectedMm: massPerMm > 0 ? this._rainAmountInjected / massPerMm : 0,
@@ -2405,7 +2403,6 @@ window.__app = {
         depthColorOptions.c3,
         depthColorOptions.c4,
       ],
-      fullM: options.depthFullM,
       legendVisible: dom.depthLegend
         ? dom.depthLegend.style.display !== "none"
         : false,
@@ -2445,13 +2442,14 @@ window.__app = {
   },
   /** 降雨模式状态（测试用）：模式/设定雨量/历时/换算率；amount 模式下附带已注入雨量等统计 */
   rainfallConfig() {
+    const thickness = fluid?._volumeThickness ?? currentBoxThicknessM();
     const cfg = {
       mode: options.rainMode,
       amountMm: options.rainAmountMm,
       durationSec: options.rainDurationSec,
       rateMmH: rainAmountRateMmH(),
-      massPerMm: rainMassPerMm(),
-      depthFullM: options.depthFullM,
+      massPerMm: rainMassPerMm(thickness),
+      boxThicknessM: thickness,
       intensity: options.rainIntensity,
       rainEnabled: !!options.rainEnabled,
       stats: fluid?.getRainfallStats?.() ?? null,

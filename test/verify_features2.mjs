@@ -82,7 +82,7 @@ check(
   `bands=${JSON.stringify(dc.bands)} box=${dc.boxThicknessM}`,
 );
 check("5 档颜色已定义", Array.isArray(dc.colors) && dc.colors.length === 5, JSON.stringify(dc.colors));
-check("雨量换算标定值 depthFullM=40", dc.fullM === 40, `fullM=${dc.fullM}`);
+check("已移除标定值 depthFullM（水深与配色同尺）", dc.fullM === undefined, `fullM=${dc.fullM}`);
 check("图例可见且 5 行", dc.legendVisible === true && dc.legendRows === 5, `visible=${dc.legendVisible} rows=${dc.legendRows}`);
 
 const legend = await page.evaluate(() => {

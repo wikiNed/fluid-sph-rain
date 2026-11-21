@@ -95,7 +95,7 @@ async function main() {
           for (let i = 0; i < data.length; i += 4) vols.push(data[i]);
           vols.sort((a, b) => a - b);
           const q = (p) => vols[Math.floor(p * (vols.length - 1))];
-          const fullM = window.__app.options.depthFullM;
+          const fullM = window.__app.depthConfig().boxThicknessM;
           return {
             thickness: f._volumeThickness,
             fullM,

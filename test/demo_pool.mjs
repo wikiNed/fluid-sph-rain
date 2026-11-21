@@ -65,7 +65,9 @@ const statsExpr = () => {
   const px = ctx.readPixels({ framebuffer: fb, x: 0, y: 0, width: tex.width, height: tex.height });
   fb.destroy();
   const W = tex.width, H = tex.height;
-  const fullM = app.options.depthFullM;
+  const dc0 = app.depthConfig();
+  const fullM = dc0.boxThicknessM;
+  const bandsM = dc0.bands;
   const bands = [0, 0, 0, 0, 0];
   let wet = 0, sumFrac = 0, maxFrac = 0, maxIdx = -1;
   for (let i = 0; i < W * H; i++) {
@@ -75,11 +77,8 @@ const statsExpr = () => {
       sumFrac += frac;
       if (frac > maxFrac) { maxFrac = frac; maxIdx = i; }
       const d = frac * fullM;
-      if (d < 2) bands[0]++;
-      else if (d < 5) bands[1]++;
-      else if (d < 10) bands[2]++;
-      else if (d < 20) bands[3]++;
-      else bands[4]++;
+      const bi = bandsM.findIndex((bm) => d < bm);
+      bands[bi < 0 ? 4 : bi]++;
     }
   }
   const col = maxIdx % W, row = Math.floor(maxIdx / W);
